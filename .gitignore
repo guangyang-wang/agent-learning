@@ -1,0 +1,9 @@
+# IDE 配置（PyCharm）
+.idea/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本地上传步骤说明（不上传）
+GitHub上传步骤.md
