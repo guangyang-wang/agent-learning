@@ -41,6 +41,15 @@
 #
 # print(Counter("hello"))      # Counter({'l': 2, 'h': 1, 'e': 1, 'o': 1})
 # print(Counter([1, 2, 2, 3])) # Counter({2: 2, 1: 1, 3: 1})
+#
+# tmp={1:1,2:2}
+# print(type(tmp.keys()))
 
-tmp={1:1,2:2}
-print(type(tmp.keys()))
+print(type(3))
+
+
+def fun(*y):
+    print(type(y))
+
+
+fun(1,2,3,4,5)
