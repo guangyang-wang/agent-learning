@@ -1,0 +1,18 @@
+# 仅用于 `pip install -e .` 的可编辑安装，让 src/ 下的 `agent` 包可被直接 import。
+# 依赖统一由 requirements.txt 管理（见 README「快速开始」）。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learning-agent"
+version = "0.1.0"
+description = "大学生智能学习多Agent系统（LangChain + LangGraph）"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
