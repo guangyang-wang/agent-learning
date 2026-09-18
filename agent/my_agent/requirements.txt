@@ -1,0 +1,33 @@
+# ============ LangChain 核心 ============
+langchain                # 顶层统一接口：Prompt、Chain、工具调用、Runnable 编排（src/agent 全局都要用）
+langchain-core           # 核心抽象：BaseMessage / BaseChatModel / Runnable，所有子包的地基
+langchain-community      # 社区集成：各种文档 Loader、第三方向量库适配器（RAG 加载数据时会用到）
+langchain-text-splitters # 文档切分器：把长文档切成 chunk（src/agent/rag/splitter.py）
+
+# ============ LLM 接入（DeepSeek，可插拔） ============
+langchain-deepseek       # DeepSeek 的 ChatModel 实现，见 src/agent/llm/factory.py
+# langchain-openai      # 切换 OpenAI 时取消注释
+# langchain-anthropic   # 切换 Claude 时取消注释
+
+# ============ LangGraph 编排 ============
+langgraph                 # 状态机编排多 Agent 图（ReAct/Plan/Debate，见 src/agent/graph/*）
+langgraph-checkpoint-sqlite # 短期记忆 Checkpointer 持久化到 SQLite（src/agent/memory/short_term.py）
+
+# ============ RAG 向量库 ============
+chromadb                  # 本地向量数据库，存 embedding 并做相似度检索（src/agent/rag/vector_store.py）
+# faiss-cpu              # Python 3.13 可能暂无对应 wheel，按需安装
+
+# ============ 文档解析 ============
+pypdf                     # PDF 课件解析（src/agent/rag/loader.py）
+
+# ============ 配置 ============
+python-dotenv             # 从 .env 加载 API Key 等环境变量（src/agent/config.py）
+pydantic                  # 数据校验 + 结构化输出（src/agent/state.py、api/schemas.py）
+
+# ============ 部署 ============
+fastapi                   # Web API 框架，把 Agent 暴露成接口（src/agent/api/app.py）
+uvicorn                   # ASGI 服务器，运行 FastAPI 应用
+
+# ============ 可观测（可选） ============
+langsmith                 # LangChain 官方追踪平台，调试链路、看每一步耗时（src/agent/observability/tracing.py）
+# langfuse                # 开源替代品，自托管可观测
