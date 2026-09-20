@@ -35,6 +35,9 @@ class Settings:
         )
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
 
+        # ---- 向量库 ----
+        self.chroma_db_path: str = os.getenv("CHROMA_DB_PATH", "chroma_db")
+
         # ---- 可观测 ----
         self.langsmith_tracing: bool = (
             os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
