@@ -1,56 +1,43 @@
-"""全局状态 Schema（AgentState）。
+"""全局状态 Schema（AgentState）—— 阶段 1 最小版本。
 
-LangGraph 的核心契约：所有节点共享同一份状态，通过 TypedDict 定义字段类型。
+作用：
+    LangGraph 的核心契约：ReAct 循环里 agent / tools 两个节点共享同一份状态，
+    通过读写这些字段在节点之间传递信息。
 
 Java 类比：
-    - AgentState 是整个工作流引擎共享的「流程上下文对象（Context）」
-    - `messages` 上的 `add_messages` reducer ≈ 往 List 里 append 而不是 set 覆盖
-    - 三张子图（ReAct / Plan / Debate）只读写各自关心的字段，像多个 service 共享一个 DTO
+    - AgentState 是整个工作流引擎共享的「流程上下文对象（Context / DTO）」
+    - `messages` 上的 `add_messages` reducer ≈ 往 List 里 add() 追加，而不是重新赋值覆盖
 
-设计要点：
-    1. `messages` 用 `add_messages`，天然追加而非覆盖，是短期记忆的载体。
-    2. 全局 schema 统一，避免子图间状态不兼容（场景四「动态切换」的前提）。
+阶段说明：
+    阶段 1 只定义最小字段（user_input / messages / iteration_count）。
+    后续阶段要加的字段先在这里留空标注（暂不实现，用到时再补）：
+      - 阶段 2：rag_results（RAG 检索结果）、long_term_index（长期记忆索引）
+      - 阶段 3：plan / current_subtask_id（任务计划 / 当前子任务）
+      - 阶段 4：debate_messages / debate_round（辩论消息池 / 轮次）
+      - 阶段 6：pending_tool_call（待用户确认的高危工具调用）
 """
 
-from typing import Any, Dict, List, TypedDict
+from typing import Annotated, List, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
-    """全局状态，各节点/子图共享。"""
+    """全局状态，ReAct 循环的 agent / tools 节点共享读写。"""
 
-    # ---- 用户输入与任务分类 ----
-    user_input: str                                    # 用户原始提问
-    task_type: str                                     # "simple" | "complex" | "debate"
-    messages: List[BaseMessage]                        # 对话消息（短期记忆载体）
-    # 注意：`add_messages` 是 reducer，需用 Annotated 声明才能实现「追加」语义：
-    #   messages: Annotated[List[BaseMessage], add_messages]
+    # ---- 用户原始输入 ----
+    # 作用：保存本轮用户提的问题，agent 节点从这里读取问题，作为第一轮思考的起点。
+    user_input: str
 
-    # ---- 规划相关（complex / Plan-and-Execute 模式） ----
-    plan: List[Dict[str, Any]]                         # [{id, desc, agent, deps, status}]
-    current_subtask_id: str                            # 当前执行的子任务 id
+    # ---- 对话消息（短期记忆载体）----
+    # 作用：保存整段对话历史（用户消息 + AI 消息 + 工具消息），是短期记忆。
+    # 关键：`add_messages` 是 reducer，实现「追加」而非「覆盖」——
+    #       每个节点往里写消息时都是在原列表上追加，不会冲掉别人写入的消息。
+    messages: Annotated[List[BaseMessage], add_messages]
 
-    # ---- 执行相关 ----
-    rag_results: List[str]                             # RAG 检索结果
-    tool_history: List[Dict[str, Any]]                 # [{tool, args, result, ts}]
-    iteration_count: int                               # ReAct 循环计数器（防死循环依据）
-    final_output: str                                  # 最终输出
-
-    # ---- 人机确认（HITL）相关 ----
-    pending_tool_call: Dict[str, Any]                  # 待用户确认的高危工具调用缓存
-
-    # ---- 辩论相关（debate / 多 Agent 辩论模式） ----
-    debate_messages: List[Dict[str, str]]              # [{role, content}] 辩论消息池
-    debate_round: int                                  # 当前辩论轮次
-
-    # ---- 长期记忆 ----
-    long_term_index: List[str]                         # 长期记忆检索索引
-
-
-# 说明：LangGraph 中带 reducer 的字段需写成 Annotated 形式。
-# 真正落地时可定义如下（保留注释供后续实现时替换上方 messages 字段）：
-#
-#   from typing import Annotated
-#   messages: Annotated[List[BaseMessage], add_messages]
+    # ---- ReAct 循环计数器（防死循环的依据）----
+    # 作用：每走一轮「agent 思考 → 调工具」就 +1；阶段 6 的防死循环机制
+    #       会读这个字段做轮次硬上限，防止模型无限循环调工具。
+    # 注意：初始调用时需置为 0（在入口处传入，见后续 main.py）。
+    iteration_count: int
