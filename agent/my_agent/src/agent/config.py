@@ -24,6 +24,17 @@ class Settings:
             "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
         )
 
+        # ---- Embedding（向量化，默认硅基流动 BGE） ----
+        self.embedding_provider: str = os.getenv(
+            "EMBEDDING_PROVIDER", "siliconflow"
+        )
+        self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+        self.siliconflow_api_key: str = os.getenv("SILICONFLOW_API_KEY", "")
+        self.siliconflow_base_url: str = os.getenv(
+            "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+        )
+        self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+
         # ---- 可观测 ----
         self.langsmith_tracing: bool = (
             os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
