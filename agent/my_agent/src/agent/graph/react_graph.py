@@ -49,7 +49,7 @@ def should_continue(state: AgentState) -> str:
     return "end"
 
 
-def build_react_graph():
+def build_react_graph(checkpointer=None):
     """构建 ReAct 子图：agent <-> tools 循环 + 条件边。
 
     图结构：
@@ -57,6 +57,11 @@ def build_react_graph():
         agent --(条件)--> tools   （最后一条消息带 tool_calls）
         agent --(条件)--> END     （无 tool_calls，直接回答）
         tools -> agent             （执行完工具，循环回 agent 再思考）
+
+    参数：
+        checkpointer：可选，传入 Checkpointer 则启用短期记忆（跨轮上下文）。
+            阶段 2 起由 main.py 传入 memory.get_checkpointer()；不传则保持
+            阶段 1 的无状态行为（每次 invoke 都是全新会话）。
 
     返回编译后的图（CompiledStateGraph）：
         - 阶段1：在 main.py 里直接 .invoke() 跑问答
@@ -75,4 +80,4 @@ def build_react_graph():
     )
     graph.add_edge("tools", "agent")
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
