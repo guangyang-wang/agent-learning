@@ -38,6 +38,14 @@ class Settings:
         # ---- 向量库 ----
         self.chroma_db_path: str = os.getenv("CHROMA_DB_PATH", "chroma_db")
 
+        # ---- 短期记忆（Checkpointer 持久化）----
+        self.checkpointer_type: str = os.getenv(
+            "CHECKPOINTER_TYPE", "sqlite"
+        )  # memory / sqlite / redis
+        self.short_term_db_path: str = os.getenv(
+            "SHORT_TERM_DB_PATH", "memory/short_term.db"
+        )
+
         # ---- 可观测 ----
         self.langsmith_tracing: bool = (
             os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
