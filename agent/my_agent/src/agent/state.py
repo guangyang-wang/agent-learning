@@ -12,12 +12,12 @@ Java 类比：
     阶段 1 只定义最小字段（user_input / messages / iteration_count）。
     后续阶段要加的字段先在这里留空标注（暂不实现，用到时再补）：
       - 阶段 2：rag_results（RAG 检索结果）、long_term_index（长期记忆索引）
-      - 阶段 3：plan / current_subtask_id（任务计划 / 当前子任务）
+      - 阶段 3：plan / current_subtask_id（任务计划 / 当前子任务）✅ 已实现
       - 阶段 4：debate_messages / debate_round（辩论消息池 / 轮次）
       - 阶段 6：pending_tool_call（待用户确认的高危工具调用）
 """
 
-from typing import Annotated, List, TypedDict
+from typing import Annotated, Any, Dict, List, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -41,3 +41,13 @@ class AgentState(TypedDict):
     #       会读这个字段做轮次硬上限，防止模型无限循环调工具。
     # 注意：初始调用时需置为 0（在入口处传入，见后续 main.py）。
     iteration_count: int
+
+    # ---- 规划相关（阶段 3 新增）----
+    # 作用：复杂任务（Plan-and-Execute）的任务计划，planner 节点生成、dispatcher 节点消费。
+    # 每个元素结构：{id, desc, agent, deps, status}，详见 graph/plan_graph.py。
+    # 用 NotRequired：简单任务（ReAct）不经过规划，这两个字段可不传，
+    #       避免简单流程也被迫填 plan（阶段 3 之前 main.py 的调用无需改动）。
+    plan: NotRequired[List[Dict[str, Any]]]
+
+    # 作用：当前正在执行的子任务 id（dispatcher 节点按拓扑序推进时更新）。
+    current_subtask_id: NotRequired[str]
