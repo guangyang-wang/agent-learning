@@ -17,6 +17,8 @@ from datetime import datetime
 
 from langchain_core.tools import tool
 
+from agent.rag.retriever import retrieve_with_fallback
+
 
 # ==================== 工具 1：数学表达式计算 ====================
 
@@ -89,14 +91,26 @@ def get_current_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ==================== 工具 3：RAG 课件检索（阶段2 占位） ====================
+# ==================== 工具 3：RAG 课件检索（阶段2） ====================
 
 @tool
 def rag_search(query: str) -> str:
     """在用户的私有课件/教材/试卷库中检索相关内容，回答课程问题时优先使用。
 
+    内部走 rag/retriever.py 的 retrieve_with_fallback：先查私有课件库，
+    未命中再逐级回退个人沉淀库 / 公共库，并据此标注「是否有课件依据」，
+    避免模型在课件里没找到依据时凭空编造。
+
     Args:
         query: 检索关键词或问题。
     """
-    # TODO(阶段2)：调用 rag/retriever.py 做真实向量检索，当前先占位
-    raise NotImplementedError("RAG 检索待实现（阶段2）")
+    chunks, hit_private = retrieve_with_fallback(query)
+
+    if not chunks:
+        return "（无课件依据）未在课件库中检索到相关内容，请据实说明未找到。"
+
+    if not hit_private:
+        header = "（注意：以下内容来自个人沉淀库，非课件原文，仅供参考）\n\n"
+    else:
+        header = ""
+    return header + "\n\n---\n\n".join(chunks)

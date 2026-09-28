@@ -25,6 +25,7 @@ htmlcov/
 chroma_db/
 *.faiss
 data/uploads/
+memory/*.db
 
 # IDE
 .idea/
