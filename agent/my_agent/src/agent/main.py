@@ -54,6 +54,7 @@ def main() -> None:
     # 第二轮「刚才那个数再加 1」若答对，说明 Checkpointer 已把第一轮上下文接上。
     thread_id = "demo-user-1"
 
+
     q1 = "请你计算 9 的平方根"
     print(f"[第1轮] {q1}")
     a1 = run_qa(q1, thread_id=thread_id)
