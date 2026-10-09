@@ -51,3 +51,10 @@ class AgentState(TypedDict):
 
     # 作用：当前正在执行的子任务 id（dispatcher 节点按拓扑序推进时更新）。
     current_subtask_id: NotRequired[str]
+
+    # ---- 子任务产出（阶段 3 新增）----
+    # 作用：记录每个子任务的执行结果 {子任务id: 产出文本}，executor 每跑完一条就写回。
+    # 用途：后续子任务（尤其 writer 汇总）把它当下文，从已有结果生成报告，
+    #       而不是重新生成——对应《架构设计》场景二步骤 9「从全局 State 汇总中间结果」。
+    # 无 reducer：executor 返回时带上完整 dict（旧结果 + 本次新结果）整体覆盖写回。
+    subtask_results: NotRequired[Dict[str, str]]

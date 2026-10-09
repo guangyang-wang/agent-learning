@@ -8,6 +8,7 @@ LangGraph 实现：agent 节点 <-> tools 节点，用 add_conditional_edges 判
 Java 类比：一个 while 循环里反复「调接口拿结果 -> 判断是否继续」。
 """
 
+from langchain_core.messages import SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from agent.graph.nodes import tools_node
@@ -16,21 +17,35 @@ from agent.state import AgentState
 from agent.tools.registry import build_default_registry
 
 
-def agent_node(state: AgentState) -> dict:
-    """LLM 思考节点：绑定工具，产出 tool_calls 或最终回答。
+def make_agent_node(system_prompt: str | None = None):
+    """工厂：造一个 LLM 思考节点，可选把角色 system prompt 前置到消息最前。
 
-    逻辑：
-        1. 取出统一 ChatModel（可插拔，默认 DeepSeek）
-        2. bind_tools 把工具描述注入模型，让模型知道何时该调哪个工具
-        3. 用整段 messages 历史调用模型，模型返回一条 AIMessage
-           （可能带 tool_calls，也可能是最终回答）
+    阶段3 复用点：knowledge / code / writer / reviewer 四个子 Agent 共用同一个
+    ReAct 循环，差异只在「角色人格」——用工厂把 system_prompt 注入循环，
+    循环逻辑（思考→调工具→观察）本身一行不改，这正是「1 底座 + 2 编排」里
+    上层编排复用底层推理的落地方式。
+
+    Java 类比：模板方法里把易变的 system prompt 作为参数传入，
+    不变的循环骨架（agent↔tools）留在图结构里。
     """
-    llm = get_llm()
-    tools = build_default_registry().all_tools()
-    llm_with_tools = llm.bind_tools(tools)
+    def agent_node(state: AgentState) -> dict:
+        llm = get_llm()
+        tools = build_default_registry().all_tools()
+        llm_with_tools = llm.bind_tools(tools)
 
-    response = llm_with_tools.invoke(state["messages"])
-    return {"messages": [response]}
+        # system prompt 只用于本次调用，不写回 state（避免每轮循环重复堆积）
+        messages = list(state["messages"])
+        if system_prompt:
+            messages = [SystemMessage(content=system_prompt), *messages]
+
+        response = llm_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    return agent_node
+
+
+# 默认（无角色）思考节点：阶段1/2 单 Agent 直接 build_react_graph() 时走它。
+agent_node = make_agent_node()
 
 
 def should_continue(state: AgentState) -> str:
@@ -49,7 +64,7 @@ def should_continue(state: AgentState) -> str:
     return "end"
 
 
-def build_react_graph(checkpointer=None):
+def build_react_graph(checkpointer=None, system_prompt: str | None = None):
     """构建 ReAct 子图：agent <-> tools 循环 + 条件边。
 
     图结构：
@@ -62,14 +77,17 @@ def build_react_graph(checkpointer=None):
         checkpointer：可选，传入 Checkpointer 则启用短期记忆（跨轮上下文）。
             阶段 2 起由 main.py 传入 memory.get_checkpointer()；不传则保持
             阶段 1 的无状态行为（每次 invoke 都是全新会话）。
+        system_prompt：可选角色提示词。阶段3 子 Agent（executor）按子任务挂载
+            对应角色时传入，让同一个 ReAct 循环扮演 knowledge/code/writer/reviewer。
 
     返回编译后的图（CompiledStateGraph）：
         - 阶段1：在 main.py 里直接 .invoke() 跑问答
+        - 阶段3：被 executor_node 按子任务复用（换 system_prompt，循环不变）
         - 阶段5：作为子图被父图 add_node 嵌入（复用同一 AgentState）
     """
     graph = StateGraph(AgentState)
 
-    graph.add_node("agent", agent_node)
+    graph.add_node("agent", make_agent_node(system_prompt))
     graph.add_node("tools", tools_node)
 
     graph.add_edge(START, "agent")

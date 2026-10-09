@@ -20,6 +20,7 @@ import re
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 
+from agent.graph.react_graph import build_react_graph
 from agent.llm.factory import get_llm
 from agent.state import AgentState
 
@@ -281,17 +282,105 @@ def dispatch_route(state: AgentState) -> str:
     return "replan"
 
 
-# ==================== 后续阶段（3-3 / 3-4）占位 ====================
+# ==================== 子任务执行（阶段3-3，复用 ReAct 循环） ====================
+
+# 四个子 Agent 的角色人格：executor 按子任务的 agent 字段取对应 prompt，
+# 套到同一个 ReAct 循环上——这就是「上层编排复用底层 ReAct 推理」。
+SUBTASK_SYSTEM_PROMPTS = {
+    "knowledge": (
+        "你是「知识检索 Agent」，负责检索与任务相关的课件/资料，并做知识点提取与资料溯源。"
+        "需要时调用检索工具；只依据检索到的内容作答，检索不到就明确说明「未找到课件依据」，"
+        "不要编造。最后输出本步骤的检索结论与关键依据。"
+    ),
+    "code": (
+        "你是「代码实验 Agent」，负责代码编写、运行调试与报错修复。"
+        "需要时调用计算/代码相关工具；遇到报错要定位原因、修正后重试。"
+        "最后输出可用的代码及简要说明。"
+    ),
+    "writer": (
+        "你是「内容写作 Agent」，负责把已有中间结果汇总成结构化文档/报告。"
+        "必须基于给定的前置子任务结果来写，不要凭空重造内容。"
+        "最后输出条理清晰的最终文档。"
+    ),
+    "reviewer": (
+        "你是「评审辩论 Agent」，负责审查上游产出的漏洞、边界问题与不规范处并给出修改建议。"
+        "每条意见尽量引用上游内容作为依据。最后输出评审意见清单。"
+    ),
+}
+
+
+def _build_subtask_input(
+    task: dict, results: dict, user_input: str
+) -> str:
+    """把「总任务 + 本步骤 + 已完成的前置结果」拼成子任务的输入消息。
+
+    带上前置结果是为了让 writer 汇总、reviewer 审查时有据可依，
+    对应《架构设计》场景二步骤 9「从全局 State 汇总中间结果，而非重新生成」。
+    """
+    lines = [
+        f"用户总任务：{user_input}",
+        "",
+        f"当前子任务（第 {task['id']} 步，执行者 {task['agent']}）：{task['desc']}",
+    ]
+    if results:
+        lines.append("")
+        lines.append("已完成的前置子任务结果（供参考/汇总）：")
+        for tid, text in results.items():          # dict 保持插入序 = 执行序
+            lines.append(f"- [{tid}] {text}")
+    lines.append("")
+    lines.append("请完成当前子任务，直接给出本步骤的产出结果。")
+    return "\n".join(lines)
+
+
+def _run_subtask(task: dict, results: dict, user_input: str) -> str:
+    """跑一个子任务：按角色挂 system prompt，复用 ReAct 子图跑完取最终回答。
+
+    每个子任务是独立的 ReAct 会话（不接 Checkpointer，避免污染父会话记忆）。
+    """
+    graph = build_react_graph(
+        system_prompt=SUBTASK_SYSTEM_PROMPTS[task["agent"]]
+    )
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(content=_build_subtask_input(task, results, user_input))
+            ],
+            "user_input": user_input,
+            "iteration_count": 0,
+        }
+    )
+    return str(result["messages"][-1].content)
+
 
 def executor_node(state: AgentState) -> dict:
     """执行 current_subtask_id 指向的子任务（内部复用 ReAct 循环）。
 
-    阶段3-3 实现：取子任务 desc，挂载对应 Agent（knowledge/code/writer/reviewer）
-    的 ReAct 循环执行，把结果写回并更新 status=success/failed。
+    取出子任务 -> 按 agent 挂角色 prompt 跑 ReAct -> 结果写入 subtask_results，
+    并把该子任务 status 置为 success / failed（失败交给 replan 局部重规划）。
     """
-    # TODO(阶段3-3)：子 Agent 内部复用 ReAct 循环
-    raise NotImplementedError("executor 节点待实现（阶段3-3）")
+    plan = state["plan"]
+    cid = state["current_subtask_id"]
+    task = next((t for t in plan if t["id"] == cid), None)
+    if task is None:
+        return {}
 
+    results = dict(state.get("subtask_results", {}))
+    try:
+        output = _run_subtask(task, results, state.get("user_input", ""))
+        status = "success"
+    except Exception as exc:  # noqa: BLE001 —— 子任务失败不炸整条流水线，交 replan
+        output = f"执行失败：{exc}"
+        status = "failed"
+
+    new_plan = [
+        {**t, "status": status} if t["id"] == cid else t for t in plan
+    ]
+    if status == "success":                        # 只沉淀成功产出，失败的不污染下文
+        results[cid] = output
+    return {"plan": new_plan, "subtask_results": results}
+
+
+# ==================== 后续阶段（3-4）占位 ====================
 
 def replan_node(state: AgentState) -> dict:
     """局部重规划：子任务失败时回填失败信息，只重规划失败部分。"""
