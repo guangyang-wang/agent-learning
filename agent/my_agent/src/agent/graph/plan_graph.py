@@ -18,7 +18,7 @@ import json
 import re
 
 from langchain_core.messages import HumanMessage
-from langgraph.graph import StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from agent.llm.factory import get_llm
 from agent.state import AgentState
@@ -215,12 +215,82 @@ def planner_node(state: AgentState) -> dict:
     return {"plan": plan}
 
 
-# ==================== 后续阶段（3-2 / 3-4）占位 ====================
+# ==================== 子任务分发（阶段3-2） ====================
+
+def _next_runnable(plan: list[dict]) -> dict | None:
+    """按拓扑序选出下一个可执行的子任务（没有则返回 None）。
+
+    拓扑序的稳定实现：按 plan 声明顺序扫描，返回第一个
+    「status 为 pending 且其 deps 全部 success」的子任务。
+    依赖全部满足才选它，天然保证前置任务先于后继任务执行；
+    同级（互相无依赖）任务按声明顺序串行执行，结果确定可复现。
+
+    Java 类比：Kahn 拓扑排序里「入度为 0 就出队」，这里改成
+    「依赖集合已被满足就出队」，边扫边选，无需预先算出完整拓扑序。
+    """
+    succeeded = {t["id"] for t in plan if t.get("status") == "success"}
+    for task in plan:
+        if task.get("status") != "pending":
+            continue
+        if all(dep in succeeded for dep in task.get("deps", [])):
+            return task
+    return None
+
 
 def dispatcher_node(state: AgentState) -> dict:
-    """按拓扑序分发子任务，更新 current_subtask_id。"""
-    # TODO(阶段3-2)：依赖序执行
-    raise NotImplementedError("dispatcher 节点待实现（阶段3-2）")
+    """按拓扑序分发子任务：选中下一个可执行子任务并置为 running。
+
+    返回 {"plan": 更新后的计划, "current_subtask_id": 子任务 id}，
+    executor（阶段3-3）据 current_subtask_id 取任务执行，执行完把
+    status 改成 success/failed 再回到本节点，循环直到计划跑完。
+
+    没有可执行子任务时返回 {} 空更新：此时要么全部完成，要么卡死
+    （失败/依赖失败），由 dispatch_route 条件边决定去 END 还是 replan。
+    """
+    plan = state["plan"]
+    task = _next_runnable(plan)
+    if task is None:
+        return {}
+
+    # 只把选中的那条改成 running，其余原样返回（plan 无 reducer，整体覆盖写回）
+    new_plan = [
+        {**t, "status": "running"} if t["id"] == task["id"] else t for t in plan
+    ]
+    return {"plan": new_plan, "current_subtask_id": task["id"]}
+
+
+def dispatch_route(state: AgentState) -> str:
+    """dispatcher 的条件边：决定 执行 / 结束 / 重规划。
+
+    判断顺序：
+        1. 有 running 的子任务 -> "execute"（刚分派出去，去执行它）
+        2. 计划非空且全部 success -> "end"（流水线跑完）
+        3. 其余（有 failed 或依赖失败的 pending，导致无任务可跑）-> "replan"
+    """
+    plan = state.get("plan", [])
+
+    current = state.get("current_subtask_id")
+    if current and any(
+        t["id"] == current and t.get("status") == "running" for t in plan
+    ):
+        return "execute"
+
+    if plan and all(t.get("status") == "success" for t in plan):
+        return "end"
+
+    return "replan"
+
+
+# ==================== 后续阶段（3-3 / 3-4）占位 ====================
+
+def executor_node(state: AgentState) -> dict:
+    """执行 current_subtask_id 指向的子任务（内部复用 ReAct 循环）。
+
+    阶段3-3 实现：取子任务 desc，挂载对应 Agent（knowledge/code/writer/reviewer）
+    的 ReAct 循环执行，把结果写回并更新 status=success/failed。
+    """
+    # TODO(阶段3-3)：子 Agent 内部复用 ReAct 循环
+    raise NotImplementedError("executor 节点待实现（阶段3-3）")
 
 
 def replan_node(state: AgentState) -> dict:
@@ -229,7 +299,33 @@ def replan_node(state: AgentState) -> dict:
     raise NotImplementedError("replan 节点待实现（阶段3-4）")
 
 
-def build_plan_graph() -> StateGraph:
-    """构建 Plan-and-Execute 子图。"""
-    # TODO(阶段3-2/3-4)：planner -> dispatcher -> (子 Agent 流水线) -> replan 兜底
-    raise NotImplementedError("Plan 子图待实现（阶段3-2/3-4）")
+def build_plan_graph(checkpointer=None):
+    """构建 Plan-and-Execute 子图。
+
+    图结构：
+        START -> planner -> dispatcher
+        dispatcher --(dispatch_route)--> executor / END / replan
+        executor -> dispatcher   （执行完一条子任务，回到调度器选下一条）
+        replan   -> dispatcher   （局部重规划后，重新调度）
+
+    Java 类比：planner 是项目经理出计划，dispatcher 是调度器按依赖派活，
+    executor 是一道工序（内部还是 ReAct），replan 是返工重排。
+    """
+    graph = StateGraph(AgentState)
+
+    graph.add_node("planner", planner_node)
+    graph.add_node("dispatcher", dispatcher_node)
+    graph.add_node("executor", executor_node)
+    graph.add_node("replan", replan_node)
+
+    graph.add_edge(START, "planner")
+    graph.add_edge("planner", "dispatcher")
+    graph.add_conditional_edges(
+        "dispatcher",
+        dispatch_route,
+        {"execute": "executor", "end": END, "replan": "replan"},
+    )
+    graph.add_edge("executor", "dispatcher")
+    graph.add_edge("replan", "dispatcher")
+
+    return graph.compile(checkpointer=checkpointer)
