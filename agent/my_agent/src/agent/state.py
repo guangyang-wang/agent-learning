@@ -58,3 +58,7 @@ class AgentState(TypedDict):
     #       而不是重新生成——对应《架构设计》场景二步骤 9「从全局 State 汇总中间结果」。
     # 无 reducer：executor 返回时带上完整 dict（旧结果 + 本次新结果）整体覆盖写回。
     subtask_results: NotRequired[Dict[str, str]]
+
+    # 作用：局部重规划已发生的次数（replan 节点自增）。
+    # 用途：失败→重规划→再失败会死循环，用 MAX_REPLAN 上限兜底，超限就放弃剩余子任务收尾。
+    replan_count: NotRequired[int]
