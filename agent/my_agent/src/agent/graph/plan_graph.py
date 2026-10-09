@@ -16,6 +16,7 @@ Java 类比：
 
 import json
 import re
+from functools import lru_cache
 
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
@@ -332,14 +333,23 @@ def _build_subtask_input(
     return "\n".join(lines)
 
 
+@lru_cache(maxsize=None)
+def _subtask_graph(agent: str):
+    """按角色取（缓存好的）ReAct 子图，最多 4 张。
+
+    compiled graph 是**无状态**的：state 由每次 invoke 传入，图对象本身不存会话，
+    因此同一张图可反复、并发调用——缓存它安全。省掉每个子任务重新 compile 的
+    3ms，也让「角色 → 图」的对应关系集中在一处。
+    """
+    return build_react_graph(system_prompt=SUBTASK_SYSTEM_PROMPTS[agent])
+
+
 def _run_subtask(task: dict, results: dict, user_input: str) -> str:
     """跑一个子任务：按角色挂 system prompt，复用 ReAct 子图跑完取最终回答。
 
     每个子任务是独立的 ReAct 会话（不接 Checkpointer，避免污染父会话记忆）。
     """
-    graph = build_react_graph(
-        system_prompt=SUBTASK_SYSTEM_PROMPTS[task["agent"]]
-    )
+    graph = _subtask_graph(task["agent"])
     result = graph.invoke(
         {
             "messages": [
