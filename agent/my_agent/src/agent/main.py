@@ -13,6 +13,7 @@ import sys
 
 from langchain_core.messages import HumanMessage
 
+from agent.api.service import final_output
 from agent.graph.plan_graph import build_plan_graph
 from agent.graph.react_graph import build_react_graph
 from agent.memory.short_term import get_checkpointer
@@ -34,23 +35,6 @@ def run_qa(question: str, thread_id: str = "default") -> str:
         config={"configurable": {"thread_id": thread_id}},
     )
     return result["messages"][-1].content
-
-
-def _final_output(plan: list[dict], results: dict) -> tuple[str | None, str]:
-    """从子任务产出里挑出「最终输出」。
-
-    优先取「没人依赖它」的收尾子任务（sink）——它代表整条流水线的终点产出。
-    若该子任务没有产出（失败/被放弃），退回到最后一个有产出的子任务。
-    """
-    depended = {dep for t in plan for dep in t.get("deps", [])}
-    sinks = [t for t in plan if t["id"] not in depended]
-    for t in reversed(sinks):
-        if t["id"] in results:
-            return t["id"], results[t["id"]]
-    for t in reversed(plan):
-        if t["id"] in results:
-            return t["id"], results[t["id"]]
-    return None, "(没有可用产出)"
 
 
 def run_plan(question: str) -> dict:
@@ -90,7 +74,7 @@ def main() -> None:
     ok = sum(1 for t in plan if t["status"] == "success")
     print(f"\n成功 {ok}/{len(plan)} 步，重规划 {result.get('replan_count', 0)} 次")
 
-    tid, output = _final_output(plan, results)
+    tid, output = final_output(plan, results)
     print(f"\n=== 最终输出（子任务 {tid}）===")
     print(output)
 

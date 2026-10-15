@@ -15,9 +15,33 @@ Java 类比：
 import argparse
 from pathlib import Path
 
-from agent.rag.loader import LocalSource, load_document
+from agent.rag.loader import LocalSource, load_document, parse_pdf
 from agent.rag.splitter import split_text
 from agent.rag.vector_store import COLLECTION_PRIVATE, add_documents
+
+
+def _store_pages(
+    pages: list[str],
+    filename: str,
+    collection: str,
+    chunk_size: int,
+    overlap: int,
+) -> int:
+    """把「每页文本」分块、打 metadata、写向量库，返回写入的 chunk 数。
+
+    逐页分块并给每个 chunk 打 metadata（来源文件 + 页码），
+    这样检索命中后能定位「这段出自第几页」，便于溯源。
+    ingest_pdf（走文件）和 ingest_bytes（走上传字节）共用这段落库逻辑。
+    """
+    chunks: list[str] = []
+    metadatas: list[dict] = []
+    for page_no, page in enumerate(pages, start=1):
+        for chunk in split_text(page, chunk_size=chunk_size, overlap=overlap):
+            chunks.append(chunk)
+            metadatas.append({"source": filename, "page": page_no})
+
+    add_documents(collection, chunks, metadatas)
+    return len(chunks)
 
 
 def ingest_pdf(
@@ -26,22 +50,24 @@ def ingest_pdf(
     chunk_size: int = 500,
     overlap: int = 50,
 ) -> int:
-    """把单个 PDF 课件加载、分块、向量化后写入向量库，返回写入的 chunk 数。
-
-    逐页分块并给每个 chunk 打 metadata（来源文件 + 页码），
-    这样检索命中后能定位「这段出自第几页」，便于溯源。
-    """
+    """把单个 PDF 课件加载、分块、向量化后写入向量库，返回写入的 chunk 数。"""
     pages = load_document(LocalSource(), path)
+    return _store_pages(pages, Path(path).name, collection, chunk_size, overlap)
 
-    chunks: list[str] = []
-    metadatas: list[dict] = []
-    for page_no, page in enumerate(pages, start=1):
-        for chunk in split_text(page, chunk_size=chunk_size, overlap=overlap):
-            chunks.append(chunk)
-            metadatas.append({"source": Path(path).name, "page": page_no})
 
-    add_documents(collection, chunks, metadatas)
-    return len(chunks)
+def ingest_bytes(
+    data: bytes,
+    filename: str,
+    collection: str = COLLECTION_PRIVATE,
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> int:
+    """把内存中的 PDF 字节直接入库（不落临时文件），返回写入的 chunk 数。
+
+    供 FastAPI 上传接口用：上传的就是字节，parse_pdf 本来就只认字节，
+    省掉「先写临时文件再读」的往返。
+    """
+    return _store_pages(parse_pdf(data), filename, collection, chunk_size, overlap)
 
 
 def ingest_directory(

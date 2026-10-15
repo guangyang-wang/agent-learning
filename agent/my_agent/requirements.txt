@@ -27,6 +27,7 @@ pydantic                  # 数据校验 + 结构化输出（src/agent/state.py�
 # ============ 部署 ============
 fastapi                   # Web API 框架，把 Agent 暴露成接口（src/agent/api/app.py）
 uvicorn                   # ASGI 服务器，运行 FastAPI 应用
+python-multipart          # FastAPI 解析 multipart 表单/文件上传（/ingest 收 PDF 课件）
 
 # ============ 可观测（可选） ============
 langsmith                 # LangChain 官方追踪平台，调试链路、看每一步耗时（src/agent/observability/tracing.py）
