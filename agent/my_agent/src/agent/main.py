@@ -1,31 +1,27 @@
-"""程序入口 —— 阶段 2：ReAct + Checkpointer 短期记忆。
+"""程序入口 —— 阶段 3：ReAct 底座 + Plan-and-Execute 编排。
 
-复用 graph/react_graph.py 编译好的 ReAct 图，喂入用户问题，
-观察「思考 -> 调工具 -> 观察 -> 作答」完整循环；
-同一 thread_id 连续多轮问答，验证 Checkpointer 跨轮记忆生效。
+两种执行模式的入口：
+    run_qa   ：简单任务 —— 单 Agent ReAct 循环（阶段1/2，带短期记忆）
+    run_plan ：复杂任务 —— Plan-and-Execute 子图（阶段3）
+                规划 → 按依赖拓扑分发 → 每个子 Agent 内部复用 ReAct → 汇总产出
 
-Java 类比：main 方法 = 启动一次「会话」，调用工作流引擎跑完一个请求；
-    thread_id = 流程实例 ID，同一个实例多轮交互能记住上文。
+Java 类比：main 方法 = 启动一次「会话」；run_qa / run_plan = 两种模式的入口方法，
+工作流引擎（图）负责把节点串起来跑完。
 """
 
 import sys
 
 from langchain_core.messages import HumanMessage
 
+from agent.graph.plan_graph import build_plan_graph
 from agent.graph.react_graph import build_react_graph
 from agent.memory.short_term import get_checkpointer
 
 
 def run_qa(question: str, thread_id: str = "default") -> str:
-    """跑一次问答：构建 ReAct 图 -> 传入问题 -> 返回最终答案。
+    """简单任务入口：跑一次 ReAct 问答（阶段1/2，带 Checkpointer 短期记忆）。
 
-    初始 state 三个字段都要给齐（对应 state.py 的 AgentState）：
-        messages         只放一条 HumanMessage（本轮问题）
-        user_input       原始问题（agent_node 当前暂未读，先照写）
-        iteration_count  初始 0（阶段 6 防死循环会读它做轮次上限）
-
-    thread_id 是 Checkpointer 定位会话的键：同一个 thread_id 的多次调用，
-    LangGraph 会自动加载上一轮 checkpoint，把历史 messages 接上，实现短期记忆。
+    同一个 thread_id 连续多轮，LangGraph 会加载上一轮 checkpoint 接上历史 messages。
     """
     graph = build_react_graph(checkpointer=get_checkpointer())
 
@@ -37,33 +33,66 @@ def run_qa(question: str, thread_id: str = "default") -> str:
         },
         config={"configurable": {"thread_id": thread_id}},
     )
-
-    # 循环结束后，messages 最后一条是「不带 tool_calls」的 AIMessage（最终回答）
     return result["messages"][-1].content
 
 
+def _final_output(plan: list[dict], results: dict) -> tuple[str | None, str]:
+    """从子任务产出里挑出「最终输出」。
+
+    优先取「没人依赖它」的收尾子任务（sink）——它代表整条流水线的终点产出。
+    若该子任务没有产出（失败/被放弃），退回到最后一个有产出的子任务。
+    """
+    depended = {dep for t in plan for dep in t.get("deps", [])}
+    sinks = [t for t in plan if t["id"] not in depended]
+    for t in reversed(sinks):
+        if t["id"] in results:
+            return t["id"], results[t["id"]]
+    for t in reversed(plan):
+        if t["id"] in results:
+            return t["id"], results[t["id"]]
+    return None, "(没有可用产出)"
+
+
+def run_plan(question: str) -> dict:
+    """复杂任务入口：跑一次 Plan-and-Execute 子图，返回最终 State。
+
+    不接 Checkpointer（每次全新会话）——Plan 图的记忆/恢复是后续阶段的议题。
+    """
+    graph = build_plan_graph()
+    return graph.invoke(
+        {"user_input": question, "messages": [], "iteration_count": 0},
+        config={"recursion_limit": 60},
+    )
+
+
 def main() -> None:
-    # Windows 控制台默认 GBK，打印中文 / ² 等字符会抛 UnicodeEncodeError，
-    # 这里把 stdout 切成 UTF-8；部分 IDE 会重定向 stdout（没有 reconfigure），跳过即可。
+    # Windows 控制台默认 GBK，打印中文会抛 UnicodeEncodeError，切成 UTF-8；
+    # 部分 IDE 会重定向 stdout（没有 reconfigure），跳过即可。
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except AttributeError:
         pass
 
-    # 演示短期记忆：同一个 thread_id 连续两轮，第二轮依赖第一轮的答案。
-    # 第二轮「刚才那个数再加 1」若答对，说明 Checkpointer 已把第一轮上下文接上。
-    thread_id = "demo-user-1"
+    question = "用 Python 实现一个快速排序函数，并写一份简短的实验报告说明思路和测试结果"
+    print(f"[复杂任务] {question}\n")
 
+    result = run_plan(question)
+    plan = result["plan"]
+    results = result.get("subtask_results", {})
 
-    q1 = "请你计算 9 的平方根"
-    print(f"[第1轮] {q1}")
-    a1 = run_qa(q1, thread_id=thread_id)
-    print(f"[答] {a1}\n")
+    print("=== 执行计划 ===")
+    for t in plan:
+        print(
+            f"  [{t['id']}] {t['agent']:9s} {t['status']:8s} "
+            f"deps={t['deps']} :: {t['desc']}"
+        )
 
-    q2 = "刚才那个数再加 1 等于多少？"
-    print(f"[第2轮] {q2}")
-    a2 = run_qa(q2, thread_id=thread_id)
-    print(f"[答] {a2}")
+    ok = sum(1 for t in plan if t["status"] == "success")
+    print(f"\n成功 {ok}/{len(plan)} 步，重规划 {result.get('replan_count', 0)} 次")
+
+    tid, output = _final_output(plan, results)
+    print(f"\n=== 最终输出（子任务 {tid}）===")
+    print(output)
 
 
 if __name__ == "__main__":
