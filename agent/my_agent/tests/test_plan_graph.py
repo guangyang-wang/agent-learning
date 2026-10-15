@@ -10,6 +10,7 @@
 """
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 import agent.graph.plan_graph as pg
 from agent.graph.plan_graph import (
@@ -20,6 +21,7 @@ from agent.graph.plan_graph import (
     _validate_revision,
     dispatcher_node,
     dispatch_route,
+    planner_node,
     replan_node,
 )
 
@@ -310,3 +312,72 @@ def test_graph_gives_up_after_repeated_failure(monkeypatch):
     assert by_id["3"] == "failed"                 # 被卡住的一并终态
     assert r["subtask_results"] == {"1": "[1] ok"}
     assert r["replan_count"] == pg.MAX_REPLAN + 1
+
+
+# ==================== 规划记忆（阶段3 跨轮次） ====================
+
+def test_recent_history_joins_user_requests():
+    msgs = [HumanMessage(content="第一问"), HumanMessage(content="第二问")]
+    assert pg._recent_history(msgs) == "- 第一问\n- 第二问"
+
+
+def test_recent_history_skips_empty_content():
+    msgs = [HumanMessage(content="有效"), HumanMessage(content="   ")]
+    assert pg._recent_history(msgs) == "- 有效"
+
+
+def test_planner_excludes_current_and_resets_execution_state(monkeypatch):
+    seen = {}
+
+    def fake_gen(user_input, history=""):
+        seen["user_input"] = user_input
+        seen["history"] = history
+        return _linear_plan()
+
+    monkeypatch.setattr(pg, "_generate_plan", fake_gen)
+    out = planner_node({
+        "user_input": "改成 Java 版",
+        "plan_messages": [
+            HumanMessage(content="写个 Python 快排"),
+            HumanMessage(content="改成 Java 版"),
+        ],
+        "subtask_results": {"1": "上一轮旧产出"},
+        "replan_count": 2,
+    })
+
+    assert seen["user_input"] == "改成 Java 版"
+    assert "写个 Python 快排" in seen["history"]
+    assert "改成 Java 版" not in seen["history"]      # 本轮请求被排除
+    assert out["subtask_results"] == {}              # 执行态被重置
+    assert out["replan_count"] == 0
+
+
+def test_plan_graph_remembers_prior_request_across_turns(monkeypatch):
+    """同一 thread_id 连跑两轮：第二轮 planner 应看到第一轮的请求。"""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    seen = []
+
+    def fake_gen(user_input, history=""):
+        seen.append((user_input, history))
+        return _linear_plan()
+
+    monkeypatch.setattr(pg, "_generate_plan", fake_gen)
+    monkeypatch.setattr(pg, "_run_subtask", lambda task, results, ui: f"[{task['id']}] ok")
+
+    graph = pg.build_plan_graph(checkpointer=MemorySaver())
+    cfg = {"configurable": {"thread_id": "t"}, "recursion_limit": 50}
+
+    graph.invoke(
+        {"user_input": "第一问", "plan_messages": [HumanMessage("第一问")],
+         "messages": [], "iteration_count": 0},
+        cfg,
+    )
+    graph.invoke(
+        {"user_input": "第二问", "plan_messages": [HumanMessage("第二问")],
+         "messages": [], "iteration_count": 0},
+        cfg,
+    )
+
+    assert seen[0][1] == ""                    # 首轮无历史
+    assert "第一问" in seen[1][1]              # 第二轮能看到第一轮

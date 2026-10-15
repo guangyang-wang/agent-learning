@@ -41,8 +41,23 @@ MAX_REPLAN = 2
 
 # ==================== 计划生成（阶段3-1） ====================
 
-def _build_plan_prompt(user_input: str, last_error: str | None = None) -> str:
-    """构造规划提示词：固定 JSON 输出格式 + 明确约束规则。"""
+def _recent_history(messages, limit: int = 6) -> str:
+    """把本会话此前的用户请求拼成一段文本，供 planner 理解上下文指代。
+
+    只取最近 limit 条，避免历史很长时把提示词撑爆。
+    """
+    lines = []
+    for m in messages[-limit:]:
+        text = str(getattr(m, "content", "")).strip()
+        if text:
+            lines.append(f"- {text}")
+    return "\n".join(lines)
+
+
+def _build_plan_prompt(
+    user_input: str, last_error: str | None = None, history: str = ""
+) -> str:
+    """构造规划提示词：固定 JSON 输出格式 + 明确约束规则（可选带历史上下文）。"""
     rules = [
         "只输出一个 JSON 数组，不要输出任何解释文字或 markdown 代码围栏",
         "子任务总数 1~8 个",
@@ -63,8 +78,14 @@ def _build_plan_prompt(user_input: str, last_error: str | None = None) -> str:
         "- reviewer：评审与审查\n\n"
         "输出规则：\n"
         + "\n".join(f"- {r}" for r in rules)
-        + f"\n\n用户任务：\n{user_input}\n"
+        + "\n\n"
     )
+    if history:
+        prompt += (
+            "同一会话中用户此前的请求（仅供你理解「它 / 刚才那个」等指代，"
+            "本次只为最新请求产出计划）：\n" + history + "\n\n"
+        )
+    prompt += f"用户任务：\n{user_input}\n"
     return prompt
 
 
@@ -186,14 +207,14 @@ def _default_plan(user_input: str) -> list[dict]:
     ]
 
 
-def _generate_plan(user_input: str) -> list[dict]:
+def _generate_plan(user_input: str, history: str = "") -> list[dict]:
     """让 LLM 生成计划，做结构校验，失败回喂重试，最终降级到默认模板计划。"""
     llm = get_llm()
     last_error: str | None = None
 
     for _ in range(MAX_PLAN_RETRIES):
         response = llm.invoke(
-            [HumanMessage(content=_build_plan_prompt(user_input, last_error))]
+            [HumanMessage(content=_build_plan_prompt(user_input, last_error, history))]
         )
         try:
             plan = _extract_json_array(str(response.content))
@@ -214,9 +235,17 @@ def planner_node(state: AgentState) -> dict:
     """规划节点：生成任务计划 plan，做结构校验（步骤数 / 依赖）。
 
     返回 {"plan": [...]} 写入全局 State，供 dispatcher（阶段3-2）按拓扑序消费。
+
+    跨轮次记忆：把本会话此前的用户请求（plan_messages）作为上下文喂给 planner，
+    使其能理解「它 / 刚才那个」等指代。plan_messages 末条是本轮请求，须排除。
+
+    每次进入都重置执行态（subtask_results / replan_count）——同一 thread 续跑时，
+    上一轮的子任务产出还留在 State 里，不重置会污染本轮的汇总与重规划判断。
     """
-    plan = _generate_plan(state["user_input"])
-    return {"plan": plan}
+    prior = list(state.get("plan_messages", []))
+    history = _recent_history(prior[:-1])
+    plan = _generate_plan(state["user_input"], history)
+    return {"plan": plan, "subtask_results": {}, "replan_count": 0}
 
 
 # ==================== 子任务分发（阶段3-2） ====================

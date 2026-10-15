@@ -26,8 +26,12 @@ from agent.api.schemas import (
     IngestResponse,
     PlanRequest,
     PlanResponse,
+    PlanSessionDetail,
+    PlanSessionSummary,
     RetrieveRequest,
     RetrieveResponse,
+    SessionDetail,
+    SessionSummary,
 )
 from agent.config import settings
 from agent.rag.vector_store import COLLECTION_PRIVATE
@@ -72,9 +76,12 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 @app.post("/plan", response_model=PlanResponse)
 def plan(req: PlanRequest) -> PlanResponse:
-    """复杂任务：跑一次 Plan-and-Execute，返回计划 + 各步产出 + 最终产出。"""
+    """复杂任务：跑一次 Plan-and-Execute，返回计划 + 各步产出 + 最终产出。
+
+    传同一个 thread_id 即可连续多轮，planner 能看到此前的请求（规划记忆）。
+    """
     try:
-        state = service.execute_plan(req.user_input)
+        state, thread_id = service.execute_plan(req.user_input, req.thread_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"规划执行失败：{type(exc).__name__}: {exc}"
@@ -88,6 +95,8 @@ def plan(req: PlanRequest) -> PlanResponse:
         subtask_results=results,
         final_output=output,
         replan_count=state.get("replan_count", 0),
+        thread_id=thread_id,
+        requests=service.plan_texts(state),
     )
 
 
@@ -117,6 +126,58 @@ def retrieve(req: RetrieveRequest) -> RetrieveResponse:
             status_code=502, detail=f"检索失败：{type(exc).__name__}: {exc}"
         ) from exc
     return RetrieveResponse(chunks=chunks, hit_private=hit_private)
+
+
+@app.get("/sessions", response_model=list[SessionSummary])
+def sessions(limit: int = 20) -> list[SessionSummary]:
+    """列出最近的会话（按最后更新时间倒序），供前端展示历史会话列表。"""
+    try:
+        return service.list_sessions(limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"读取会话列表失败：{type(exc).__name__}: {exc}"
+        ) from exc
+
+
+@app.get("/sessions/{thread_id}", response_model=SessionDetail)
+def session_detail(thread_id: str) -> SessionDetail:
+    """取某个会话的完整对话，用于切回历史会话继续聊。"""
+    try:
+        messages = service.get_session(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"读取会话失败：{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if not messages:
+        raise HTTPException(status_code=404, detail=f"会话不存在或没有可展示的消息：{thread_id}")
+    return SessionDetail(thread_id=thread_id, messages=messages)
+
+
+@app.get("/plan/sessions", response_model=list[PlanSessionSummary])
+def plan_sessions(limit: int = 20) -> list[PlanSessionSummary]:
+    """列出最近的规划会话（供 /plan 页左侧展示历史）。"""
+    try:
+        return service.list_plan_sessions(limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"读取规划会话列表失败：{type(exc).__name__}: {exc}"
+        ) from exc
+
+
+@app.get("/plan/sessions/{thread_id}", response_model=PlanSessionDetail)
+def plan_session_detail(thread_id: str) -> PlanSessionDetail:
+    """取某个规划会话：各轮请求 + 最后一次执行的计划与产出。"""
+    try:
+        data = service.get_plan_session(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"读取规划会话失败：{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"规划会话不存在：{thread_id}")
+    return PlanSessionDetail(**data)
 
 
 if __name__ == "__main__":

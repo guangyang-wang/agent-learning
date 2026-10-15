@@ -33,6 +33,9 @@ class PlanRequest(BaseModel):
     """复杂任务请求。"""
 
     user_input: str
+    # 可选：会话 id（对应 Checkpointer 的 thread_id）。
+    # 传了就接上该会话此前的请求，planner 能理解上下文指代；不传由服务端生成并回传。
+    thread_id: str | None = None
 
 
 class PlanStep(BaseModel):
@@ -54,6 +57,10 @@ class PlanResponse(BaseModel):
     subtask_results: dict[str, str] = Field(default_factory=dict)
     final_output: str
     replan_count: int = 0
+    # 回传实际使用的 thread_id，客户端下一轮沿用即可接上规划记忆。
+    thread_id: str
+    # 该 thread 累计的用户请求（含本轮），让前端能直接展示「本会话问过什么」。
+    requests: list[str] = Field(default_factory=list)
 
 
 # ==================== 课件入库（/ingest） ====================
@@ -84,3 +91,57 @@ class RetrieveResponse(BaseModel):
 
     chunks: list[str]
     hit_private: bool
+
+
+# ==================== 会话历史（/sessions） ====================
+
+class SessionSummary(BaseModel):
+    """会话列表里的一条（对应一个 thread_id）。"""
+
+    thread_id: str
+    # 最后一次写入的时间（ISO 8601，来自 checkpoint 的 ts）
+    updated_at: str
+    # 可展示的消息条数（只算用户/AI 有文本的，不含工具调用轮）
+    message_count: int
+    # 首条用户提问的摘要，作为会话标题
+    preview: str
+
+
+class SessionMessage(BaseModel):
+    """会话里的一条可展示消息。"""
+
+    role: str  # user | assistant
+    content: str
+
+
+class SessionDetail(BaseModel):
+    """某个会话的完整对话（用于切回历史会话继续聊）。"""
+
+    thread_id: str
+    messages: list[SessionMessage]
+
+
+# ==================== 规划会话历史（/plan/sessions） ====================
+
+class PlanSessionSummary(BaseModel):
+    """规划会话列表里的一条。"""
+
+    thread_id: str
+    updated_at: str
+    # 该会话累计问过多少次（plan_messages 条数）
+    request_count: int
+    # 首个请求的摘要，作为会话标题
+    preview: str
+
+
+class PlanSessionDetail(BaseModel):
+    """某个规划会话：各轮请求 + 最后一次执行的计划与产出。"""
+
+    thread_id: str
+    # 该会话累计的用户请求（按时间序）
+    requests: list[str]
+    plan: list[PlanStep]
+    subtask_results: dict[str, str] = Field(default_factory=dict)
+    final_output: str
+    replan_count: int = 0
+

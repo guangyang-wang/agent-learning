@@ -37,15 +37,25 @@ def run_qa(question: str, thread_id: str = "default") -> str:
     return result["messages"][-1].content
 
 
-def run_plan(question: str) -> dict:
+def run_plan(question: str, thread_id: str = "default") -> dict:
     """复杂任务入口：跑一次 Plan-and-Execute 子图，返回最终 State。
 
-    不接 Checkpointer（每次全新会话）——Plan 图的记忆/恢复是后续阶段的议题。
+    与 run_qa 一样接 Checkpointer：同一 thread_id 续跑时，planner 能看到
+    此前的请求（存在 plan_messages），从而理解「它 / 刚才那个」等指代。
     """
-    graph = build_plan_graph()
+    checkpointer = get_checkpointer()
+    if hasattr(checkpointer, "setup"):
+        checkpointer.setup()
+
+    graph = build_plan_graph(checkpointer=checkpointer)
     return graph.invoke(
-        {"user_input": question, "messages": [], "iteration_count": 0},
-        config={"recursion_limit": 60},
+        {
+            "user_input": question,
+            "plan_messages": [HumanMessage(content=question)],
+            "messages": [],
+            "iteration_count": 0,
+        },
+        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 60},
     )
 
 

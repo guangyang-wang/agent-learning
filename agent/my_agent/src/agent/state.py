@@ -36,6 +36,14 @@ class AgentState(TypedDict):
     #       每个节点往里写消息时都是在原列表上追加，不会冲掉别人写入的消息。
     messages: Annotated[List[BaseMessage], add_messages]
 
+    # ---- 规划会话记忆（阶段 3 Plan 图专用）----
+    # 作用：Plan 图跨轮次的「用户请求历史」，让 planner 理解「它 / 刚才那个」等指代。
+    # 为什么单开一个通道而不用 messages：plan 会话若写进 messages，会混进 /sessions
+    #       （那是 chat 的会话列表）；且 chat / plan 两图若共用同一 thread_id，
+    #       状态会互相污染。分开存，各管各的。
+    #       每次 invoke 追加本轮 user_input，同样走 add_messages 追加语义。
+    plan_messages: NotRequired[Annotated[List[BaseMessage], add_messages]]
+
     # ---- ReAct 循环计数器（防死循环的依据）----
     # 作用：每走一轮「agent 思考 → 调工具」就 +1；阶段 6 的防死循环机制
     #       会读这个字段做轮次硬上限，防止模型无限循环调工具。
