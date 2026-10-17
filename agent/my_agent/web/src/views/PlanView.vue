@@ -88,7 +88,9 @@ async function loadSessions() {
 
 /** 点会话列表：把该规划会话拉回来（各轮请求 + 最后一次的计划/产出） */
 async function openSession(session) {
-  if (loading.value || session.thread_id === threadId.value) return
+  // 不能在 thread_id 与当前相同时提前返回：刷新页面后 result 是空的，
+  // 但 localStorage 里的 thread_id 仍指向那条历史，提前返回会导致「点不开」。
+  if (loading.value) return
   try {
     const detail = await getPlanSession(session.thread_id)
     saveThreadId(detail.thread_id)
@@ -355,6 +357,12 @@ onMounted(loadSessions)
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* flex 子项默认会被压缩：结果卡片一多，就会被挤成细条、看起来像大片空白。
+   禁止收缩，内容超高时交给 .main 滚动。 */
+.main > * {
+  flex: 0 0 auto;
 }
 
 .tip :deep(.el-alert__title) {
