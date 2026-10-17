@@ -14,7 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.api import service
+from agent import usage
+from agent.api import service, task_gate
 from agent.api.app import app
 from agent.config import settings
 
@@ -57,11 +58,13 @@ def fake_plan():
 
 
 @pytest.fixture
-def client(monkeypatch, fake_react, fake_plan):
+def client(monkeypatch, fake_react, fake_plan, tmp_path):
     """预注入假图 / 假检索 / 假入库，再用 TestClient 触发 lifespan。
 
     service.init() 见到 _react_graph 非空会短路，因此不会去建真图、开 sqlite。
+    使用次数用临时数据库，避免测试污染真实的 memory/usage.db。
     """
+    monkeypatch.setattr(settings, "usage_db_path", str(tmp_path / "usage.db"))
     monkeypatch.setattr(service, "_react_graph", fake_react)
     monkeypatch.setattr(service, "_plan_graph", fake_plan)
     monkeypatch.setattr(service, "search", lambda query, top_k=4: (["片段A"], True))
@@ -94,20 +97,25 @@ def test_health(client):
 # ==================== /chat ====================
 
 def test_chat_returns_output_and_thread_id(client, fake_react):
-    r = client.post("/chat", json={"user_input": "你好", "thread_id": "t1"})
+    r = client.post(
+        "/chat", json={"user_input": "你好", "user_name": "张三", "thread_id": "t1"}
+    )
 
     assert r.status_code == 200
     body = r.json()
     assert body["output"] == "桩回答"
     assert body["task_type"] == "simple"
     assert body["thread_id"] == "t1"          # 传了就用它
+    assert body["remaining"] == body["limit"] - 1   # 消耗一次后全局剩余
     # thread_id 确实透传到图的 config，短期记忆才认得同一会话
-    _, config = fake_react.calls[0]
+    state, config = fake_react.calls[0]
     assert config["configurable"]["thread_id"] == "t1"
+    # 姓名随本轮消息一起写进 State，历史里才能按轮次展示提问人
+    assert state["user_names"] == ["张三"]
 
 
 def test_chat_generates_thread_id_when_absent(client):
-    r = client.post("/chat", json={"user_input": "你好"})
+    r = client.post("/chat", json={"user_input": "你好", "user_name": "张三"})
     assert r.status_code == 200
     assert r.json()["thread_id"]                # 未传 -> 服务端生成非空 id
 
@@ -118,15 +126,72 @@ def test_chat_llm_failure_maps_to_502(monkeypatch, client):
             raise RuntimeError("模型超时")
 
     monkeypatch.setattr(service, "_react_graph", _Boom())
-    r = client.post("/chat", json={"user_input": "你好"})
+    r = client.post("/chat", json={"user_input": "你好", "user_name": "张三"})
     assert r.status_code == 502
     assert "模型超时" in r.json()["detail"]
+
+
+def test_chat_requires_user_name(client):
+    assert client.post("/chat", json={"user_input": "你好"}).status_code == 422
+    assert (
+        client.post("/chat", json={"user_input": "你好", "user_name": "   "}).status_code
+        == 422
+    )
+
+
+def test_busy_returns_429(client):
+    with task_gate.llm_slot():               # 模拟另一个任务正在调用大模型
+        r = client.post("/chat", json={"user_input": "你好", "user_name": "张三"})
+    assert r.status_code == 429
+    assert "别人正在使用" in r.json()["detail"]
+
+
+def test_usage_limit_reached_returns_429(monkeypatch, client):
+    monkeypatch.setattr(settings, "usage_limit", 0)
+    r = client.post("/chat", json={"user_input": "你好", "user_name": "张三"})
+    assert r.status_code == 429
+    assert "使用次数已用完" in r.json()["detail"]
+
+
+def test_usage_endpoint_counts_consumption(client):
+    before = client.get("/usage").json()
+    assert before["used"] == 0
+    assert before["remaining"] == before["limit"]
+
+    client.post("/chat", json={"user_input": "你好", "user_name": "张三"})
+
+    after = client.get("/usage").json()
+    assert after["used"] == 1
+    assert after["remaining"] == before["limit"] - 1
+
+
+def test_visible_messages_pairs_user_names():
+    messages = [
+        HumanMessage(content="q1"),
+        AIMessage(content="a1"),
+        ToolMessage(content="工具返回", tool_call_id="call-1"),
+        HumanMessage(content="q2"),
+        AIMessage(content=""),  # 只带工具调用的空回复，应被过滤
+    ]
+    out = service.visible_messages(messages, ["张三", "李四"])
+
+    assert [m["role"] for m in out] == ["user", "assistant", "user"]
+    assert out[0]["name"] == "张三"
+    assert out[2]["name"] == "李四"
+
+
+def test_plan_names_align_with_requests():
+    channel_values = {
+        "plan_messages": [HumanMessage(content="q1"), HumanMessage(content="q2")],
+        "plan_names": ["张三", "李四"],
+    }
+    assert service.plan_names(channel_values) == ["张三", "李四"]
 
 
 # ==================== /plan ====================
 
 def test_plan_returns_structure_and_final_output(client):
-    r = client.post("/plan", json={"user_input": "写代码并写报告"})
+    r = client.post("/plan", json={"user_input": "写代码并写报告", "user_name": "张三"})
 
     assert r.status_code == 200
     body = r.json()
@@ -140,7 +205,9 @@ def test_plan_returns_structure_and_final_output(client):
 
 
 def test_plan_passes_thread_id_to_graph(client, fake_plan):
-    r = client.post("/plan", json={"user_input": "写代码", "thread_id": "p1"})
+    r = client.post(
+        "/plan", json={"user_input": "写代码", "user_name": "张三", "thread_id": "p1"}
+    )
 
     assert r.status_code == 200
     assert r.json()["thread_id"] == "p1"         # 传了就用它
@@ -150,7 +217,7 @@ def test_plan_passes_thread_id_to_graph(client, fake_plan):
 
 
 def test_plan_generates_thread_id_when_absent(client):
-    r = client.post("/plan", json={"user_input": "写代码"})
+    r = client.post("/plan", json={"user_input": "写代码", "user_name": "张三"})
     assert r.status_code == 200
     assert r.json()["thread_id"]                # 未传 -> 服务端生成非空 id
 
@@ -250,14 +317,16 @@ def test_visible_messages_drops_tools_and_empty_ai():
         AIMessage(content="最终回答"),
     ]
     assert service.visible_messages(raw) == [
-        {"role": "user", "content": "问题"},
-        {"role": "assistant", "content": "最终回答"},
+        {"role": "user", "content": "问题", "name": ""},
+        {"role": "assistant", "content": "最终回答", "name": ""},
     ]
 
 
 def test_visible_messages_joins_multimodal_blocks():
     raw = [AIMessage(content=[{"type": "text", "text": "前"}, {"type": "text", "text": "后"}])]
-    assert service.visible_messages(raw) == [{"role": "assistant", "content": "前后"}]
+    assert service.visible_messages(raw) == [
+        {"role": "assistant", "content": "前后", "name": ""}
+    ]
 
 
 # ==================== 会话历史：列出与读取 ====================
@@ -342,8 +411,8 @@ def test_get_session_returns_visible_messages(fake_checkpointer):
         AIMessage(content="回答"),
     ])])
     assert service.get_session("t1") == [
-        {"role": "user", "content": "问题"},
-        {"role": "assistant", "content": "回答"},
+        {"role": "user", "content": "问题", "name": ""},
+        {"role": "assistant", "content": "回答", "name": ""},
     ]
 
 
@@ -360,16 +429,16 @@ def test_sessions_endpoint(client, monkeypatch):
 
 def test_session_detail_endpoint(client, monkeypatch):
     monkeypatch.setattr(service, "get_session", lambda tid: [
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你也好"},
+        {"role": "user", "content": "你好", "name": "张三"},
+        {"role": "assistant", "content": "你也好", "name": ""},
     ])
     r = client.get("/sessions/t1")
     assert r.status_code == 200
     assert r.json() == {
         "thread_id": "t1",
         "messages": [
-            {"role": "user", "content": "你好"},
-            {"role": "assistant", "content": "你也好"},
+            {"role": "user", "content": "你好", "name": "张三"},
+            {"role": "assistant", "content": "你也好", "name": ""},
         ],
     }
 

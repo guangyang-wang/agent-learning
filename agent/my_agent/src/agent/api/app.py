@@ -20,7 +20,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from agent.api import service
+from agent import usage
+from agent.api import service, task_gate
 from agent.api.schemas import (
     ChatRequest,
     ChatResponse,
@@ -34,6 +35,7 @@ from agent.api.schemas import (
     SessionDetail,
     SessionSummary,
     UploadRecord,
+    UsageResponse,
 )
 from agent.config import settings
 
@@ -65,14 +67,23 @@ def health() -> dict:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    """简单任务：跑一次 ReAct 问答。传同一个 thread_id 即可连续多轮带上下文。"""
+    """简单任务：跑一次 ReAct 问答。传同一个 thread_id 即可连续多轮带上下文。
+
+    全局同一时刻只允许一个任务调用大模型；忙时返回 429。
+    """
     try:
-        output, thread_id = service.answer(req.user_input, req.thread_id)
+        with task_gate.llm_slot():
+            quota = usage.consume()
+            output, thread_id = service.answer(
+                req.user_input, req.user_name, req.thread_id
+            )
+    except (task_gate.BusyError, usage.UsageLimitExceeded) as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 —— LLM/网络等外部故障，统一转 502
         raise HTTPException(
             status_code=502, detail=f"问答失败：{type(exc).__name__}: {exc}"
         ) from exc
-    return ChatResponse(output=output, thread_id=thread_id)
+    return ChatResponse(output=output, thread_id=thread_id, **quota)
 
 
 @app.post("/plan", response_model=PlanResponse)
@@ -80,9 +91,16 @@ def plan(req: PlanRequest) -> PlanResponse:
     """复杂任务：跑一次 Plan-and-Execute，返回计划 + 各步产出 + 最终产出。
 
     传同一个 thread_id 即可连续多轮，planner 能看到此前的请求（规划记忆）。
+    全局同一时刻只允许一个任务调用大模型；忙时返回 429。
     """
     try:
-        state, thread_id = service.execute_plan(req.user_input, req.thread_id)
+        with task_gate.llm_slot():
+            quota = usage.consume()
+            state, thread_id = service.execute_plan(
+                req.user_input, req.user_name, req.thread_id
+            )
+    except (task_gate.BusyError, usage.UsageLimitExceeded) as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"规划执行失败：{type(exc).__name__}: {exc}"
@@ -98,7 +116,15 @@ def plan(req: PlanRequest) -> PlanResponse:
         replan_count=state.get("replan_count", 0),
         thread_id=thread_id,
         requests=service.plan_texts(state),
+        request_names=service.plan_names(state),
+        **quota,
     )
+
+
+@app.get("/usage", response_model=UsageResponse)
+def usage_status() -> UsageResponse:
+    """查询全局使用次数（不消耗次数）。"""
+    return UsageResponse(**usage.status())
 
 
 @app.post("/ingest", response_model=IngestResponse)

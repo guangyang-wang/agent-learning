@@ -57,6 +57,10 @@ class Settings:
             "LANGSMITH_PROJECT", "learning-agent"
         )
 
+        # ---- 使用限额 ----
+        self.usage_db_path: str = os.getenv("USAGE_DB_PATH", "memory/usage.db")
+        self.usage_limit: int = int(os.getenv("USAGE_LIMIT", "50"))
+
         # ---- 服务 ----
         self.host: str = os.getenv("HOST", "0.0.0.0")
         self.port: int = int(os.getenv("PORT", "8000"))

@@ -50,11 +50,14 @@ def init() -> None:
     _plan_graph = build_plan_graph(checkpointer=checkpointer)
 
 
-def answer(question: str, thread_id: str | None = None) -> tuple[str, str]:
+def answer(
+    question: str, user_name: str, thread_id: str | None = None
+) -> tuple[str, str]:
     """简单任务：跑一次 ReAct 问答，返回 (回答文本, 实际使用的 thread_id)。
 
     同一个 thread_id 连续多轮，会接上该会话的历史 messages（短期记忆）。
     未传 thread_id 时生成一个并回传，供客户端下一轮沿用。
+    user_name 与消息一起累积进 State，历史里据此展示每轮提问人。
     """
     if _react_graph is None:
         init()
@@ -63,6 +66,7 @@ def answer(question: str, thread_id: str | None = None) -> tuple[str, str]:
     result = _react_graph.invoke(
         {
             "messages": [HumanMessage(content=question)],
+            "user_names": [user_name],
             "user_input": question,
             "iteration_count": 0,
         },
@@ -71,7 +75,9 @@ def answer(question: str, thread_id: str | None = None) -> tuple[str, str]:
     return result["messages"][-1].content, tid
 
 
-def execute_plan(question: str, thread_id: str | None = None) -> tuple[dict, str]:
+def execute_plan(
+    question: str, user_name: str, thread_id: str | None = None
+) -> tuple[dict, str]:
     """复杂任务：跑一次 Plan-and-Execute 子图，返回 (完整 State, 实际使用的 thread_id)。
 
     与 /chat 一样用 thread_id 挂短期记忆：同一 id 续跑时，planner 能看到此前
@@ -86,6 +92,7 @@ def execute_plan(question: str, thread_id: str | None = None) -> tuple[dict, str
         {
             "user_input": question,
             "plan_messages": [HumanMessage(content=question)],
+            "plan_names": [user_name],
             "messages": [],
             "iteration_count": 0,
         },
@@ -172,14 +179,18 @@ def _text_of(message) -> str:
     return content.strip()
 
 
-def visible_messages(messages: list) -> list[dict]:
+def visible_messages(messages: list, user_names: list[str] | None = None) -> list[dict]:
     """只保留「用户提问」和「有正文的 AI 回答」。
 
     丢掉两类噪声：
         - ToolMessage（工具返回，不该出现在对话历史里）
         - 只带 tool_calls、content 为空的 AIMessage（模型调工具那一轮，没有正文）
+
+    user_names 与用户消息按顺序一一对应，给每条用户消息打上提问人。
     """
+    names = user_names or []
     out: list[dict] = []
+    user_index = 0
     for m in messages:
         role = _role_of(m)
         if role is None:
@@ -187,7 +198,12 @@ def visible_messages(messages: list) -> list[dict]:
         text = _text_of(m)
         if not text:
             continue
-        out.append({"role": role, "content": text})
+        item = {"role": role, "content": text, "name": ""}
+        if role == "user":
+            if user_index < len(names):
+                item["name"] = names[user_index]
+            user_index += 1
+        out.append(item)
     return out
 
 
@@ -211,18 +227,22 @@ def list_sessions(limit: int = 20) -> list[dict]:
         if previous is not None and previous["updated_at"] >= updated_at:
             continue  # 该会话已有更新的快照
 
+        channel_values = tup.checkpoint.get("channel_values") or {}
         messages = visible_messages(
-            (tup.checkpoint.get("channel_values") or {}).get("messages") or []
+            channel_values.get("messages") or [],
+            channel_values.get("user_names") or [],
         )
         if not messages:
             continue
 
-        first_user = next((m["content"] for m in messages if m["role"] == "user"), "")
+        first_user = next((m for m in messages if m["role"] == "user"), None)
         latest[thread_id] = {
             "thread_id": thread_id,
             "updated_at": updated_at,
             "message_count": len(messages),
-            "preview": first_user[:_PREVIEW_LEN] or "(无提问)",
+            "preview": (first_user["content"][:_PREVIEW_LEN] if first_user else "")
+            or "(无提问)",
+            "user_name": (first_user.get("name", "") if first_user else ""),
         }
 
     ordered = sorted(latest.values(), key=lambda s: s["updated_at"], reverse=True)
@@ -235,8 +255,10 @@ def get_session(thread_id: str) -> list[dict]:
     tup = checkpointer.get_tuple({"configurable": {"thread_id": thread_id}})
     if tup is None:
         return []
+    channel_values = tup.checkpoint.get("channel_values") or {}
     return visible_messages(
-        (tup.checkpoint.get("channel_values") or {}).get("messages") or []
+        channel_values.get("messages") or [],
+        channel_values.get("user_names") or [],
     )
 
 
@@ -257,6 +279,17 @@ def plan_texts(channel_values: dict) -> list[str]:
     ]
 
 
+def plan_names(channel_values: dict) -> list[str]:
+    """各轮请求的提问人姓名，与 plan_texts 按顺序一一对应；旧会话可能为空。"""
+    messages = channel_values.get("plan_messages") or []
+    names = channel_values.get("plan_names") or []
+    return [
+        str(names[i]) if i < len(names) else ""
+        for i, m in enumerate(messages)
+        if str(getattr(m, "content", "")).strip()
+    ]
+
+
 def list_plan_sessions(limit: int = 20) -> list[dict]:
     """列出最近的规划会话（按最后更新时间倒序）。
 
@@ -271,9 +304,11 @@ def list_plan_sessions(limit: int = 20) -> list[dict]:
         if configurable.get("checkpoint_ns"):
             continue  # 子图（executor:*）的 checkpoint 不算独立会话
 
-        texts = plan_texts(tup.checkpoint.get("channel_values") or {})
+        channel_values = tup.checkpoint.get("channel_values") or {}
+        texts = plan_texts(channel_values)
         if not texts:
             continue  # 不是规划会话
+        names = plan_names(channel_values)
 
         thread_id = configurable["thread_id"]
         updated_at = tup.checkpoint.get("ts", "")
@@ -286,6 +321,7 @@ def list_plan_sessions(limit: int = 20) -> list[dict]:
             "updated_at": updated_at,
             "request_count": len(texts),
             "preview": texts[0][:_PREVIEW_LEN] or "(无提问)",
+            "user_name": names[0] if names else "",
         }
 
     ordered = sorted(latest.values(), key=lambda s: s["updated_at"], reverse=True)
@@ -315,6 +351,7 @@ def get_plan_session(thread_id: str) -> dict | None:
     return {
         "thread_id": thread_id,
         "requests": texts,
+        "request_names": plan_names(channel_values),
         "plan": plan,
         "subtask_results": results,
         "final_output": output,

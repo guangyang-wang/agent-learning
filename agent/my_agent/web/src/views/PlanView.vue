@@ -1,9 +1,12 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getPlanSession, listPlanSessions, plan } from '../api/client'
+import { ElMessage } from 'element-plus'
+import { getPlanSession, getUsage, listPlanSessions, plan } from '../api/client'
 import MarkdownView from '../components/MarkdownView.vue'
 
 const input = ref('')
+const userName = ref('')
+const usage = ref(null)
 const loading = ref(false)
 const result = ref(null)
 
@@ -86,6 +89,14 @@ async function loadSessions() {
   }
 }
 
+async function loadUsage() {
+  try {
+    usage.value = await getUsage()
+  } catch {
+    // 拦截器已弹错
+  }
+}
+
 /** 点会话列表：把该规划会话拉回来（各轮请求 + 最后一次的计划/产出） */
 async function openSession(session) {
   // 不能在 thread_id 与当前相同时提前返回：刷新页面后 result 是空的，
@@ -108,17 +119,24 @@ function newTask() {
 
 async function run() {
   const text = input.value.trim()
+  const name = userName.value.trim()
   if (!text || loading.value) return
+  if (!name) {
+    ElMessage.warning('请先输入姓名')
+    return
+  }
 
   loading.value = true
   result.value = null
   try {
-    const res = await plan(text, threadId.value)
+    const res = await plan(text, threadId.value, name)
     saveThreadId(res.thread_id)
     result.value = res
-    loadSessions() // 刷新列表，让新会话/时间和轮数跟上
+    usage.value = { used: res.used, limit: res.limit, remaining: res.remaining }
+    loadSessions() // 刷新列表，让新会话/时间/轮数/提问人跟上
   } catch {
     // 拦截器已弹错
+    loadUsage()
   } finally {
     loading.value = false
   }
@@ -126,7 +144,10 @@ async function run() {
 
 const resultsOf = (id) => result.value?.subtask_results?.[id]
 
-onMounted(loadSessions)
+onMounted(() => {
+  loadSessions()
+  loadUsage()
+})
 </script>
 
 <template>
@@ -151,8 +172,8 @@ onMounted(loadSessions)
         >
           <div class="session-preview">{{ s.preview }}</div>
           <div class="session-meta">
-            <span>{{ formatTime(s.updated_at) }}</span>
-            <span>{{ s.request_count }} 轮</span>
+            <span class="session-owner">{{ s.user_name || '未署名' }}</span>
+            <span>{{ formatTime(s.updated_at) }} · {{ s.request_count }} 轮</span>
           </div>
         </div>
       </div>
@@ -169,8 +190,24 @@ onMounted(loadSessions)
 
       <el-card shadow="never" class="bar">
         <div class="bar-row">
+          <span class="label">姓名：</span>
+          <el-input
+            v-model="userName"
+            size="small"
+            class="name-input"
+            placeholder="请输入姓名"
+            :disabled="loading"
+          />
           <span class="label">thread_id：</span>
           <el-tag type="info">{{ threadId }}</el-tag>
+          <el-tag
+            v-if="usage"
+            :type="usage.remaining > 0 ? 'success' : 'danger'"
+            size="small"
+            effect="plain"
+          >
+            剩余 {{ usage.remaining }}/{{ usage.limit }} 次
+          </el-tag>
           <span class="hint">同一 id 连续提问，planner 会记住此前的请求</span>
           <el-button
             size="small"
@@ -207,7 +244,12 @@ onMounted(loadSessions)
         <el-card v-if="result.requests?.length" shadow="never">
           <template #header>本会话请求（{{ result.requests.length }} 轮）</template>
           <ol class="requests">
-            <li v-for="(r, i) in result.requests" :key="i">{{ r }}</li>
+            <li v-for="(r, i) in result.requests" :key="i">
+              <span v-if="result.request_names?.[i]" class="request-name">
+                {{ result.request_names[i] }}：
+              </span>
+              {{ r }}
+            </li>
           </ol>
         </el-card>
 
@@ -345,8 +387,16 @@ onMounted(loadSessions)
   margin-top: 4px;
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   color: #909399;
+}
+
+.session-owner {
+  color: #409eff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 右：当前任务 ---- */
@@ -385,6 +435,10 @@ onMounted(loadSessions)
   color: #606266;
 }
 
+.name-input {
+  width: 140px;
+}
+
 .hint {
   font-size: 12px;
   color: #909399;
@@ -409,6 +463,11 @@ onMounted(loadSessions)
   font-size: 13px;
   color: #303133;
   line-height: 1.9;
+}
+
+.request-name {
+  color: #409eff;
+  font-weight: 600;
 }
 
 .card-head {

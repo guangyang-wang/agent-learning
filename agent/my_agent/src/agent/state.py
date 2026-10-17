@@ -17,6 +17,7 @@ Java 类比：
       - 阶段 6：pending_tool_call（待用户确认的高危工具调用）
 """
 
+import operator
 from typing import Annotated, Any, Dict, List, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
@@ -36,6 +37,9 @@ class AgentState(TypedDict):
     #       每个节点往里写消息时都是在原列表上追加，不会冲掉别人写入的消息。
     messages: Annotated[List[BaseMessage], add_messages]
 
+    # 每轮提问人姓名，与 messages 里的用户消息一一对应（逐轮追加）
+    user_names: NotRequired[Annotated[List[str], operator.add]]
+
     # ---- 规划会话记忆（阶段 3 Plan 图专用）----
     # 作用：Plan 图跨轮次的「用户请求历史」，让 planner 理解「它 / 刚才那个」等指代。
     # 为什么单开一个通道而不用 messages：plan 会话若写进 messages，会混进 /sessions
@@ -43,6 +47,9 @@ class AgentState(TypedDict):
     #       状态会互相污染。分开存，各管各的。
     #       每次 invoke 追加本轮 user_input，同样走 add_messages 追加语义。
     plan_messages: NotRequired[Annotated[List[BaseMessage], add_messages]]
+
+    # 规划会话每轮提问人，与 plan_messages 一一对应
+    plan_names: NotRequired[Annotated[List[str], operator.add]]
 
     # ---- ReAct 循环计数器（防死循环的依据）----
     # 作用：每走一轮「agent 思考 → 调工具」就 +1；阶段 6 的防死循环机制

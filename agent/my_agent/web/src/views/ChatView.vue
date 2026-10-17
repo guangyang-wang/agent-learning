@@ -1,12 +1,14 @@
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { chat, getSession, listSessions } from '../api/client'
+import { chat, getSession, getUsage, listSessions } from '../api/client'
 import MarkdownView from '../components/MarkdownView.vue'
 
-// 对话记录：{ role: 'user' | 'assistant', content, failed? }
+// 对话记录：{ role: 'user' | 'assistant', content, name?, failed? }
 const messages = ref([])
 const input = ref('')
+const userName = ref('')
+const usage = ref(null)
 const loading = ref(false)
 const scroller = ref(null)
 
@@ -54,6 +56,14 @@ async function loadSessions() {
   }
 }
 
+async function loadUsage() {
+  try {
+    usage.value = await getUsage()
+  } catch {
+    // 拦截器已弹错
+  }
+}
+
 /** 点会话列表：把该会话的历史拉回来，并切到它的 thread_id 继续聊 */
 async function openSession(session) {
   if (loading.value || session.thread_id === threadId.value) return
@@ -75,32 +85,43 @@ async function newSession() {
 
 async function send() {
   const text = input.value.trim()
+  const name = userName.value.trim()
   if (!text || loading.value) return
+  if (!name) {
+    ElMessage.warning('请先输入姓名')
+    return
+  }
 
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push({ role: 'user', content: text, name })
   input.value = ''
   loading.value = true
   await scrollToBottom()
 
   try {
-    const res = await chat(text, threadId.value)
+    const res = await chat(text, threadId.value, name)
     threadId.value = res.thread_id
     messages.value.push({ role: 'assistant', content: res.output })
-    loadSessions() // 刷新列表，让摘要和时间跟上
-  } catch {
-    // 具体错误已由拦截器弹出，这里在对话流里留个痕迹便于排查
+    usage.value = { used: res.used, limit: res.limit, remaining: res.remaining }
+    loadSessions() // 刷新列表，让摘要、时间和提问人跟上
+  } catch (err) {
+    // 拦截器已弹提示；这里在对话流里也留个痕迹，并带上后端原因（如「别人正在使用」）
+    const detail = err.response?.data?.detail
     messages.value.push({
       role: 'assistant',
-      content: '（请求失败，请确认后端已启动）',
+      content: detail ? `（${detail}）` : '（请求失败，请确认后端已启动）',
       failed: true,
     })
+    loadUsage()
   } finally {
     loading.value = false
     await scrollToBottom()
   }
 }
 
-onMounted(loadSessions)
+onMounted(() => {
+  loadSessions()
+  loadUsage()
+})
 </script>
 
 <template>
@@ -125,8 +146,8 @@ onMounted(loadSessions)
         >
           <div class="session-preview">{{ s.preview }}</div>
           <div class="session-meta">
-            <span>{{ formatTime(s.updated_at) }}</span>
-            <span>{{ s.message_count }} 条</span>
+            <span class="session-owner">{{ s.user_name || '未署名' }}</span>
+            <span>{{ formatTime(s.updated_at) }} · {{ s.message_count }} 条</span>
           </div>
         </div>
       </div>
@@ -136,8 +157,24 @@ onMounted(loadSessions)
     <div class="main">
       <el-card shadow="never" class="bar">
         <div class="bar-row">
+          <span class="label">姓名：</span>
+          <el-input
+            v-model="userName"
+            size="small"
+            class="name-input"
+            placeholder="请输入姓名"
+            :disabled="loading"
+          />
           <span class="label">thread_id：</span>
           <el-tag type="info">{{ threadId }}</el-tag>
+          <el-tag
+            v-if="usage"
+            :type="usage.remaining > 0 ? 'success' : 'danger'"
+            size="small"
+            effect="plain"
+          >
+            剩余 {{ usage.remaining }}/{{ usage.limit }} 次
+          </el-tag>
           <span class="hint">同一 id 连续提问可验证短期记忆</span>
         </div>
       </el-card>
@@ -152,6 +189,7 @@ onMounted(loadSessions)
           :class="m.role === 'user' ? 'row-right' : 'row-left'"
         >
           <div class="bubble" :class="[m.role, { failed: m.failed }]">
+            <div v-if="m.role === 'user' && m.name" class="bubble-name">{{ m.name }}</div>
             <MarkdownView v-if="m.role === 'assistant' && !m.failed" :content="m.content" />
             <div v-else class="pre-wrap">{{ m.content }}</div>
           </div>
@@ -242,8 +280,16 @@ onMounted(loadSessions)
   margin-top: 4px;
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
   color: #909399;
+}
+
+.session-owner {
+  color: #409eff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 右：对话 ---- */
@@ -264,6 +310,10 @@ onMounted(loadSessions)
 .label {
   font-size: 13px;
   color: #606266;
+}
+
+.name-input {
+  width: 140px;
 }
 
 .hint {
@@ -303,6 +353,12 @@ onMounted(loadSessions)
   background: #409eff;
   color: #fff;
   line-height: 1.6;
+}
+
+.bubble-name {
+  margin-bottom: 2px;
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .bubble.assistant {

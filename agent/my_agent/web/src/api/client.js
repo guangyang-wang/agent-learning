@@ -27,12 +27,23 @@ client.interceptors.response.use(
 export const health = () => client.get('/health')
 
 /** 单 Agent ReAct 问答；thread_id 相同即接上历史（短期记忆） */
-export const chat = (userInput, threadId) =>
-  client.post('/chat', { user_input: userInput, thread_id: threadId })
+export const chat = (userInput, threadId, userName) =>
+  client.post('/chat', {
+    user_input: userInput,
+    thread_id: threadId,
+    user_name: userName,
+  })
 
 /** Plan-and-Execute 复杂任务；thread_id 相同即接上历史（planner 记得此前的请求） */
-export const plan = (userInput, threadId) =>
-  client.post('/plan', { user_input: userInput, thread_id: threadId })
+export const plan = (userInput, threadId, userName) =>
+  client.post('/plan', {
+    user_input: userInput,
+    thread_id: threadId,
+    user_name: userName,
+  })
+
+/** 全局使用次数（不消耗次数） */
+export const getUsage = () => client.get('/usage')
 
 /** 只跑检索，不过 LLM */
 export const retrieve = (query, topK = 4) =>

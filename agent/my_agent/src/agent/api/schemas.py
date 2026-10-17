@@ -4,7 +4,12 @@ Java 类比：Controller 层的 DTO（@RequestBody / @ResponseBody 对应的类�
 把 HTTP 的 JSON 和业务对象解耦——接口签名只认这些模型，内部实现怎么变都不影响调用方。
 """
 
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from pydantic import BaseModel, Field, StringConstraints
+
+# 姓名：去首尾空白，禁止空字符串
+UserName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
 
 
 # ==================== 简单任务：ReAct 单 Agent（/chat） ====================
@@ -13,6 +18,8 @@ class ChatRequest(BaseModel):
     """对话请求。"""
 
     user_input: str
+    # 使用人姓名：历史会话展示 + 共享部署时区分使用者
+    user_name: UserName
     # 可选：会话 id（对应 Checkpointer 的 thread_id）。
     # 传了就接上该会话的历史 messages；不传由服务端生成并回传。
     thread_id: str | None = None
@@ -25,6 +32,10 @@ class ChatResponse(BaseModel):
     output: str
     # 回传实际使用的 thread_id，方便客户端下一轮沿用（短期记忆的钥匙）。
     thread_id: str
+    # 本次消耗后的全局剩余次数
+    used: int = 0
+    limit: int = 0
+    remaining: int = 0
 
 
 # ==================== 复杂任务：Plan-and-Execute（/plan） ====================
@@ -33,6 +44,8 @@ class PlanRequest(BaseModel):
     """复杂任务请求。"""
 
     user_input: str
+    # 使用人姓名：历史规划展示 + 共享部署时区分使用者
+    user_name: UserName
     # 可选：会话 id（对应 Checkpointer 的 thread_id）。
     # 传了就接上该会话此前的请求，planner 能理解上下文指代；不传由服务端生成并回传。
     thread_id: str | None = None
@@ -61,6 +74,12 @@ class PlanResponse(BaseModel):
     thread_id: str
     # 该 thread 累计的用户请求（含本轮），让前端能直接展示「本会话问过什么」。
     requests: list[str] = Field(default_factory=list)
+    # 与 requests 一一对应的提问人姓名
+    request_names: list[str] = Field(default_factory=list)
+    # 本次消耗后的全局剩余次数
+    used: int = 0
+    limit: int = 0
+    remaining: int = 0
 
 
 # ==================== 课件入库（/ingest） ====================
@@ -110,6 +129,16 @@ class RetrieveResponse(BaseModel):
     hit_private: bool
 
 
+# ==================== 使用次数（/usage） ====================
+
+class UsageResponse(BaseModel):
+    """全局使用次数。"""
+
+    used: int
+    limit: int
+    remaining: int
+
+
 # ==================== 会话历史（/sessions） ====================
 
 class SessionSummary(BaseModel):
@@ -122,6 +151,8 @@ class SessionSummary(BaseModel):
     message_count: int
     # 首条用户提问的摘要，作为会话标题
     preview: str
+    # 会话发起人（首轮提问时填写的姓名）
+    user_name: str = ""
 
 
 class SessionMessage(BaseModel):
@@ -129,6 +160,8 @@ class SessionMessage(BaseModel):
 
     role: str  # user | assistant
     content: str
+    # 用户消息的提问人；AI 消息为空
+    name: str = ""
 
 
 class SessionDetail(BaseModel):
@@ -149,6 +182,8 @@ class PlanSessionSummary(BaseModel):
     request_count: int
     # 首个请求的摘要，作为会话标题
     preview: str
+    # 会话发起人（首轮提问时填写的姓名）
+    user_name: str = ""
 
 
 class PlanSessionDetail(BaseModel):
@@ -157,6 +192,8 @@ class PlanSessionDetail(BaseModel):
     thread_id: str
     # 该会话累计的用户请求（按时间序）
     requests: list[str]
+    # 与 requests 一一对应的提问人姓名
+    request_names: list[str] = Field(default_factory=list)
     plan: list[PlanStep]
     subtask_results: dict[str, str] = Field(default_factory=dict)
     final_output: str
