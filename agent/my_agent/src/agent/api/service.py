@@ -13,14 +13,17 @@ Java 类比：@Service 层。Controller（app.py）只管收请求、校验、�
 """
 
 import uuid
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
 from agent.graph.plan_graph import build_plan_graph
 from agent.graph.react_graph import build_react_graph
 from agent.memory.short_term import get_checkpointer
+from agent.rag import upload_store
 from agent.rag.ingest import ingest_bytes
 from agent.rag.retriever import retrieve_with_fallback
+from agent.rag.vector_store import COLLECTION_PRIVATE
 
 # 进程级单例（模块加载时为空，由 init() 填充）
 _react_graph = None
@@ -108,9 +111,32 @@ def final_output(plan: list[dict], results: dict) -> tuple[str | None, str]:
     return None, "(没有可用产出)"
 
 
-def ingest_upload(filename: str, data: bytes) -> int:
-    """把上传的 PDF 字节入库，返回写入的 chunk 数。"""
-    return ingest_bytes(data, filename)
+def ingest_upload(filename: str, data: bytes) -> dict:
+    """把上传的 PDF 入库，保存原文件 + 元数据，返回上传记录。
+
+    按内容去重：sha256 相同的文件直接复用已有记录，不重复向量化，
+    避免同一份课件在检索结果里重复命中。
+    """
+    digest = upload_store.sha256_of(data)
+    existing = upload_store.find_by_sha256(digest)
+    if existing is not None:
+        return {**existing, "deduplicated": True}
+
+    chunks = ingest_bytes(data, filename)
+    record = upload_store.save_upload(
+        data, filename, chunks, COLLECTION_PRIVATE, digest
+    )
+    return {**record, "deduplicated": False}
+
+
+def list_uploads() -> list[dict]:
+    """上传历史（按时间倒序）。"""
+    return upload_store.list_uploads()
+
+
+def get_upload_file(upload_id: str) -> tuple[Path, dict] | None:
+    """取下载所需的（文件路径, 记录）；不存在返回 None。"""
+    return upload_store.get_upload_file(upload_id)
 
 
 def search(query: str, top_k: int = 4) -> tuple[list[str], bool]:

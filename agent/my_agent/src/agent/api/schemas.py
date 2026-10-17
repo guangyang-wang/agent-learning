@@ -71,6 +71,23 @@ class IngestResponse(BaseModel):
     filename: str
     chunks: int
     collection: str
+    # 上传记录 id，用于下载原文件
+    upload_id: str = ""
+    size: int = 0
+    uploaded_at: str = ""
+    # 内容与历史记录完全相同（sha256 一致）时为 True，此时没有重复入库
+    deduplicated: bool = False
+
+
+class UploadRecord(BaseModel):
+    """上传历史里的一条记录。"""
+
+    upload_id: str
+    filename: str
+    size: int
+    chunks: int
+    collection: str
+    uploaded_at: str
 
 
 # ==================== 检索调试（/retrieve） ====================

@@ -16,6 +16,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent.api import service
 from agent.api.app import app
+from agent.config import settings
+
+# 上传历史测试要用真实实现，先留存函数引用（fixture 会临时替换 service.ingest_upload）
+_REAL_INGEST_UPLOAD = service.ingest_upload
 
 
 class _FakeGraph:
@@ -61,7 +65,19 @@ def client(monkeypatch, fake_react, fake_plan):
     monkeypatch.setattr(service, "_react_graph", fake_react)
     monkeypatch.setattr(service, "_plan_graph", fake_plan)
     monkeypatch.setattr(service, "search", lambda query, top_k=4: (["片段A"], True))
-    monkeypatch.setattr(service, "ingest_upload", lambda filename, data: 7)
+    monkeypatch.setattr(
+        service,
+        "ingest_upload",
+        lambda filename, data: {
+            "upload_id": "a" * 32,
+            "filename": filename,
+            "size": len(data),
+            "chunks": 7,
+            "collection": "user_private",
+            "uploaded_at": "2026-10-17T00:00:00+00:00",
+            "deduplicated": False,
+        },
+    )
 
     with TestClient(app) as c:
         yield c
@@ -152,6 +168,43 @@ def test_ingest_upload_returns_chunks(client):
     assert body["filename"] == "课件.pdf"
     assert body["chunks"] == 7
     assert body["collection"] == "user_private"
+    assert body["upload_id"] == "a" * 32
+
+
+def test_upload_history_dedup_and_download(client, monkeypatch, tmp_path):
+    # 用真实实现 + 临时目录，验证「存原件 -> 列表 -> 去重 -> 下载」闭环
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+    monkeypatch.setattr(service, "ingest_upload", _REAL_INGEST_UPLOAD)
+    monkeypatch.setattr(service, "ingest_bytes", lambda data, filename: 3)
+
+    first = client.post(
+        "/ingest", files={"file": ("课件.pdf", b"%PDF-1.4 same", "application/pdf")}
+    )
+    assert first.status_code == 200
+    assert first.json()["deduplicated"] is False
+    upload_id = first.json()["upload_id"]
+
+    # 内容相同 -> 复用记录，不重复入库
+    second = client.post(
+        "/ingest", files={"file": ("重命名.pdf", b"%PDF-1.4 same", "application/pdf")}
+    )
+    assert second.status_code == 200
+    assert second.json()["deduplicated"] is True
+    assert second.json()["upload_id"] == upload_id
+
+    history = client.get("/ingest/history").json()
+    assert len(history) == 1
+    assert history[0]["upload_id"] == upload_id
+
+    download = client.get(f"/ingest/history/{upload_id}/download")
+    assert download.status_code == 200
+    assert download.content == b"%PDF-1.4 same"
+    assert "attachment" in download.headers["content-disposition"]
+
+
+def test_upload_download_missing_returns_404(client):
+    r = client.get("/ingest/history/" + "b" * 32 + "/download")
+    assert r.status_code == 404
 
 
 def test_ingest_bad_pdf_maps_to_400(monkeypatch, client):

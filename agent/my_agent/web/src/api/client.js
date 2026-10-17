@@ -45,6 +45,25 @@ export function ingest(file) {
   return client.post('/ingest', form)
 }
 
+/** 上传历史（按上传时间倒序） */
+export const listUploads = () => client.get('/ingest/history')
+
+/** 下载某次上传的原文件 */
+export async function downloadUpload(record) {
+  const blob = await client.get(
+    `/ingest/history/${encodeURIComponent(record.upload_id)}/download`,
+    { responseType: 'blob' },
+  )
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = record.filename || 'upload.pdf'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 /** 列出最近的会话（历史会话列表） */
 export const listSessions = (limit = 20) =>
   client.get('/sessions', { params: { limit } })

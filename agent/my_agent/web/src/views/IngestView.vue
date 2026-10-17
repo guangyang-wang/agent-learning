@@ -1,11 +1,49 @@
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ingest } from '../api/client'
+import { downloadUpload, ingest, listUploads } from '../api/client'
 
 const fileList = ref([]) // el-upload 的受控文件列表
 const loading = ref(false)
 const result = ref(null)
+
+// 上传历史
+const history = ref([])
+const historyLoading = ref(false)
+
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    history.value = await listUploads()
+  } catch {
+    // 拦截器已弹错
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function download(record) {
+  try {
+    await downloadUpload(record)
+  } catch {
+    // 拦截器已弹错
+  }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 // 手动上传：选中文件后由「开始入库」按钮触发，避免一选就传
 async function submit() {
@@ -19,7 +57,8 @@ async function submit() {
   result.value = null
   try {
     result.value = await ingest(raw)
-    ElMessage.success('入库完成')
+    ElMessage.success(result.value.deduplicated ? '内容已存在，未重复入库' : '入库完成')
+    loadHistory()
   } catch {
     // 拦截器已弹错
   } finally {
@@ -39,6 +78,8 @@ function onChange(_file, files) {
   fileList.value = files.length ? [files[files.length - 1]] : []
   result.value = null
 }
+
+onMounted(loadHistory)
 </script>
 
 <template>
@@ -78,7 +119,11 @@ function onChange(_file, files) {
       正在向量化并写库…
     </el-card>
 
-    <el-result v-if="result" icon="success" title="入库成功">
+    <el-result
+      v-if="result"
+      :icon="result.deduplicated ? 'info' : 'success'"
+      :title="result.deduplicated ? '内容已存在，未重复入库' : '入库成功'"
+    >
       <template #sub-title>
         <div class="result-line">文件：{{ result.filename }}</div>
         <div class="result-line">
@@ -88,8 +133,45 @@ function onChange(_file, files) {
         <div class="result-line">
           目标库：<el-tag type="info">{{ result.collection }}</el-tag>
         </div>
+        <div v-if="result.deduplicated" class="result-line">
+          相同内容的文件此前已入库，直接沿用了历史记录。
+        </div>
       </template>
     </el-result>
+
+    <el-card shadow="never">
+      <template #header>
+        <div class="history-head">
+          <span>上传历史</span>
+          <el-button size="small" :loading="historyLoading" @click="loadHistory">
+            刷新
+          </el-button>
+        </div>
+      </template>
+
+      <el-table
+        v-loading="historyLoading"
+        :data="history"
+        size="small"
+        empty-text="还没有上传记录"
+      >
+        <el-table-column prop="filename" label="文件名" min-width="180" show-overflow-tooltip />
+        <el-table-column label="大小" width="90">
+          <template #default="{ row }">{{ formatSize(row.size) }}</template>
+        </el-table-column>
+        <el-table-column prop="chunks" label="片段数" width="80" />
+        <el-table-column label="上传时间" width="150">
+          <template #default="{ row }">{{ formatTime(row.uploaded_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="download(row)">
+              下载
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
   </div>
 </template>
 
@@ -114,5 +196,13 @@ function onChange(_file, files) {
   margin: 6px 0;
   color: #606266;
   font-size: 14px;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
 }
 </style>

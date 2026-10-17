@@ -38,6 +38,9 @@ class Settings:
         # ---- 向量库 ----
         self.chroma_db_path: str = os.getenv("CHROMA_DB_PATH", "chroma_db")
 
+        # ---- 上传课件原件（历史列表 / 下载）----
+        self.upload_dir: str = os.getenv("UPLOAD_DIR", "data/uploads")
+
         # ---- 短期记忆（Checkpointer 持久化）----
         self.checkpointer_type: str = os.getenv(
             "CHECKPOINTER_TYPE", "sqlite"

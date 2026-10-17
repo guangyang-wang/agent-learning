@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from agent.api import service
 from agent.api.schemas import (
@@ -32,9 +33,9 @@ from agent.api.schemas import (
     RetrieveResponse,
     SessionDetail,
     SessionSummary,
+    UploadRecord,
 )
 from agent.config import settings
-from agent.rag.vector_store import COLLECTION_PRIVATE
 
 
 @asynccontextmanager
@@ -102,18 +103,56 @@ def plan(req: PlanRequest) -> PlanResponse:
 
 @app.post("/ingest", response_model=IngestResponse)
 def ingest(file: UploadFile = File(...)) -> IngestResponse:
-    """上传 PDF 课件入库（加载 -> 分块 -> 向量化 -> 写向量库）。"""
+    """上传 PDF 课件入库（加载 -> 分块 -> 向量化 -> 写向量库），并保留原文件。"""
     filename = file.filename or "upload.pdf"
     data = file.file.read()
     try:
-        chunks = service.ingest_upload(filename, data)
+        record = service.ingest_upload(filename, data)
     except (ValueError, FileNotFoundError) as exc:  # 解析不出文本 / 文件问题 —— 客户端输入错
         raise HTTPException(status_code=400, detail=f"课件解析失败：{exc}") from exc
     except Exception as exc:  # noqa: BLE001 —— 向量化/写库等外部故障
         raise HTTPException(
             status_code=502, detail=f"入库失败：{type(exc).__name__}: {exc}"
         ) from exc
-    return IngestResponse(filename=filename, chunks=chunks, collection=COLLECTION_PRIVATE)
+    return IngestResponse(
+        filename=record["filename"],
+        chunks=record["chunks"],
+        collection=record["collection"],
+        upload_id=record["upload_id"],
+        size=record["size"],
+        uploaded_at=record["uploaded_at"],
+        deduplicated=record.get("deduplicated", False),
+    )
+
+
+@app.get("/ingest/history", response_model=list[UploadRecord])
+def ingest_history() -> list[UploadRecord]:
+    """上传历史（按上传时间倒序）。"""
+    try:
+        records = service.list_uploads()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"读取上传历史失败：{type(exc).__name__}: {exc}"
+        ) from exc
+    return [UploadRecord(**record) for record in records]
+
+
+@app.get("/ingest/history/{upload_id}/download")
+def download_upload(upload_id: str) -> FileResponse:
+    """下载某次上传的原始 PDF。"""
+    try:
+        found = service.get_upload_file(upload_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"下载失败：{type(exc).__name__}: {exc}"
+        ) from exc
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"上传记录不存在：{upload_id}")
+
+    path, record = found
+    return FileResponse(
+        path, media_type="application/pdf", filename=record["filename"]
+    )
 
 
 @app.post("/retrieve", response_model=RetrieveResponse)
