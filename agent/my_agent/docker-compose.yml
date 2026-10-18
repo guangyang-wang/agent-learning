@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: learning-agent-backend:latest
+    container_name: learning-agent-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 容器内统一用绝对路径，避免和宿主机目录混淆
+      CHROMA_DB_PATH: /app/chroma_db
+      UPLOAD_DIR: /app/data/uploads
+      SHORT_TERM_DB_PATH: /app/memory/short_term.db
+      USAGE_DB_PATH: /app/memory/usage.db
+      USAGE_LIMIT: ${USAGE_LIMIT:-50}
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      - ./data/memory:/app/memory
+      - ./data/chroma_db:/app/chroma_db
+      - ./data/uploads:/app/data/uploads
+    expose:
+      - "8000"
+
+  web:
+    image: nginx:alpine
+    container_name: learning-agent-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./web/dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend

@@ -2,9 +2,19 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { health } from './api/client'
+import EntryGate from './components/EntryGate.vue'
 
 const route = useRoute()
 const router = useRouter()
+
+// 入口问答：答对后存 sessionStorage —— 同一标签页刷新不再问，新开/重新打开会再问。
+const ENTRY_KEY = 'entry_passed'
+const passed = ref(false)
+try {
+  passed.value = sessionStorage.getItem(ENTRY_KEY) === '1'
+} catch {
+  passed.value = false
+}
 
 const navs = computed(() => router.options.routes.filter((r) => r.meta?.title))
 const currentTitle = computed(() => route.meta?.title || '')
@@ -21,11 +31,25 @@ async function probe() {
   }
 }
 
-onMounted(probe)
+function onPass() {
+  passed.value = true
+  try {
+    sessionStorage.setItem(ENTRY_KEY, '1')
+  } catch {
+    // 隐私模式写不进去，本次页面内仍然有效
+  }
+  probe()
+}
+
+onMounted(() => {
+  if (passed.value) probe()
+})
 </script>
 
 <template>
-  <el-container class="layout">
+  <EntryGate v-if="!passed" @pass="onPass" />
+
+  <el-container v-else class="layout">
     <el-aside width="220px" class="aside">
       <div class="brand">多 Agent 学习系统</div>
       <el-menu :default-active="route.path" router class="menu">
