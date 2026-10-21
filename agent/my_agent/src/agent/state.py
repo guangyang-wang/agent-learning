@@ -13,7 +13,7 @@ Java 类比：
     后续阶段要加的字段先在这里留空标注（暂不实现，用到时再补）：
       - 阶段 2：rag_results（RAG 检索结果）、long_term_index（长期记忆索引）
       - 阶段 3：plan / current_subtask_id（任务计划 / 当前子任务）✅ 已实现
-      - 阶段 4：debate_messages / debate_round（辩论消息池 / 轮次）
+      - 阶段 4：debate_messages / debate_round / final_output（辩论消息池 / 轮次 / 评审报告）✅ 已实现
       - 阶段 6：pending_tool_call（待用户确认的高危工具调用）
 """
 
@@ -77,3 +77,17 @@ class AgentState(TypedDict):
     # 作用：局部重规划已发生的次数（replan 节点自增）。
     # 用途：失败→重规划→再失败会死循环，用 MAX_REPLAN 上限兜底，超限就放弃剩余子任务收尾。
     replan_count: NotRequired[int]
+
+    # ---- 辩论消息池（阶段 4 辩论图专用）----
+    # 作用：立论 / 批判 / 仲裁三个对等 Agent 轮流发言，每条 [{role, content}] 追加进池。
+    # 关键：operator.add 是 reducer，节点只需返回「本轮新增的一条」，
+    #       LangGraph 自动把它拼到已有池子后面，各节点不用读改写整池。
+    #       与 messages 的 add_messages 不同，这里存的是普通 dict，便于前端按角色展示。
+    debate_messages: NotRequired[Annotated[List[Dict[str, str]], operator.add]]
+
+    # 作用：已完成的辩论轮次（一轮 = 立论 + 批判），收敛判断据此做轮次硬上限。
+    debate_round: NotRequired[int]
+
+    # ---- 最终答复（阶段 4 起使用）----
+    # 作用：辩论图由仲裁 Agent 写入完整评审报告；后续阶段 5 的路由父图也统一读这里。
+    final_output: NotRequired[str]
